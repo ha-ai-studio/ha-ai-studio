@@ -1,4 +1,4 @@
-"""Isolated configured actions; Home Assistant owns orchestration."""
+"""Configured Actions shared by MQTT requests and virtual Device measurements."""
 import asyncio
 import copy
 import hashlib
@@ -59,6 +59,7 @@ class ActionService:
         if self.environment:self.environment.home_assistant=getattr(repositories,'home_assistant',None)
         from .assets import ActionAssets
         self.assets=ActionAssets(self)
+        self.device_configs=lambda: []
         self.identity=self.store.read('identity.json')
         if self.identity is None:
             ident='studio_'+hashlib.sha256((namespace+'/'+definition['id']).encode()).hexdigest()[:24];self.identity={'prefix':ident,'device_id':ident};self.store.write('identity.json',self.identity)
@@ -183,7 +184,7 @@ class ActionService:
     async def execute(self,data,settings):
         if self.environment:return await self.environment.execute(data,settings)
         return await asyncio.wait_for(self.plugin.execute(data,settings),30)
-    async def request(self,payload):
+    async def request(self,payload,configuration=None):
         # The caller owns lock throughout execution and delivery.
         body,error=await parse(payload,self.plugin)
         if error:
@@ -194,8 +195,9 @@ class ActionService:
             if cached['digest']!=hashed:return error_result(id,'request_id_conflict','This request_id was already used for different data.'),self.config['active']
             if cached.get('result') is not None:return cached['result'],cached['config']
             return error_result(id,'interrupted','Execution was interrupted. Use a new request_id only to intentionally start another execution.'),cached['config']
-        config=copy.deepcopy(self.config['active']);entry={'digest':hashed,'config':config,'result':None,'execution':'processing','delivery':'not_sent'}
+        config=copy.deepcopy(configuration if configuration is not None else self.config['active']);entry={'digest':hashed,'config':config,'result':None,'execution':'processing','delivery':'not_sent'}
         if self.environment:entry['plugin']=copy.deepcopy(self.plugin.record)
+        if configuration is not None:entry['source']='device'
         candidate={**self.jobs,id:entry};candidate=dict(list(candidate.items())[-MAX_JOBS:])
         self.store.write('action-jobs.json',candidate);self.jobs=candidate
         self.last={'request_id':id,'execution':'processing','delivery':'not_sent','timestamp':stamp()};self.store.write('action-last.json',self.last)
@@ -212,6 +214,16 @@ class ActionService:
         self.store.write('action-jobs.json',candidate);self.jobs=candidate
         self.trace('processing','Execution finished: '+result['status']+'.')
         return result,config
+    async def internal_request(self, request_id, data, config):
+        """Share the persisted execution path without MQTT input or delivery."""
+        async with self.lock:
+            if self.deleted or not self.supported:raise Invalid('Action is unavailable.')
+            if self.environment:self.environment.require()
+            result, _ = await self.request(json.dumps({'request_id':request_id,'data':data}), config)
+            self.last={'request_id':request_id,'execution':result['status'],'delivery':'not_sent','timestamp':stamp(),'source':'device'}
+            self.store.write('action-last.json',self.last)
+            return result
+
     async def run_request_payload(self,payload,generation=None):
         async with self.lock:
             if generation is not None and generation!=self.transport_generation:return None
@@ -316,6 +328,9 @@ class Studio:
         for config in self.registry['agents']:
             location=self.store.root if config['id']==self.registry.get('legacy_id') else self.store.root/'agents'/config['id']
             self.services[config['id']]=ActionService(location,config,self.namespace,self.brokers,self.repositories)
+        from .devices import Devices
+        self.devices=Devices(self)
+        for id, service in self.services.items():service.device_configs=lambda id=id: self.devices.action_configs(id)
         from .discovery import Discovery
         self.discovery=Discovery(self)
         self.brokers.discovery=self.discovery
@@ -335,6 +350,7 @@ class Studio:
             definition={'id':id,'name':value['name'].strip(),'action_type':value['type']}
             if value['type'] not in TYPES:definition['plugin']=self.repositories.types()[value['type']].record
             service=ActionService(self.store.root/'agents'/id,definition,self.namespace,self.brokers,self.repositories)
+            service.device_configs=lambda: self.devices.action_configs(id)
             candidate=copy.deepcopy(self.registry);candidate['agents'].append(definition)
             self.store.write('agents.json',candidate);self.registry=candidate;self.services[id]=service
             if self.running:service.task=asyncio.create_task(service.run())
@@ -344,6 +360,7 @@ class Studio:
         async with self.brokers.lock:
             async with self.lock:
                 service=self.get(id);service.ensure_idle()
+                if self.devices.references(id, active_only=True):raise Invalid('Deactivate devices using this action before reloading its source.')
                 if service.enabled:raise Invalid('Deactivate the action before reloading its source.')
                 if not service.environment or not service.plugin.metadata.get('local'):raise Invalid('Only local actions support source reload.')
                 async with service.lock:
@@ -376,6 +393,7 @@ class Studio:
         async with self.brokers.lock:
             async with self.lock:
                 service=self.get(value['id']);service.ensure_idle()
+                if self.devices.references(value['id']):raise Invalid('Remove this action from devices before deleting it.')
                 candidate=copy.deepcopy(self.registry);definition=next(c for c in candidate['agents'] if c['id']==value['id'])
                 candidate['agents']=[c for c in candidate['agents'] if c['id']!=value['id']];candidate.setdefault('deleted',[]).append(definition)
                 self.store.write('agents.json',candidate);self.registry=candidate;service.deleted=True;del self.services[value['id']]
@@ -385,10 +403,12 @@ class Studio:
         self.home_assistant.start()
         self.repositories.start()
         await self.brokers.refresh();self.running=True
+        self.devices.task=asyncio.create_task(self.devices.run())
         self.discovery.task=asyncio.create_task(self.discovery.run())
         for service in self.services.values():service.task=asyncio.create_task(service.run())
     async def close(self):
         self.running=False
+        await self.devices.close()
         await self.repositories.close()
         for service in self.services.values():await service.close()
         await self.discovery.close()

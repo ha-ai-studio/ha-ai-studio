@@ -80,7 +80,7 @@ class ActionAssets:
             async with self.lock:
                 path=self.path(value['id'])
                 # Generic JSON references: protect saved draft, active and historical configurations/results.
-                if value['id'] in json.dumps([self.service.config,self.service.jobs],ensure_ascii=True):
+                if value['id'] in json.dumps([self.service.config,self.service.jobs,self.service.device_configs()],ensure_ascii=True):
                     raise Invalid('Image is referenced by a saved configuration or execution history.')
                 path.unlink()
         return {'deleted':True}

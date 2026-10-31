@@ -1,6 +1,6 @@
-# HA AI Studio — Actions
+# HA AI Studio — Devices and Actions
 
-Home Assistant orchestrates; HA AI Studio executes single configured Actions. This release includes only **Echo**, a technical MQTT test that returns JSON data unchanged. No workflows, mappings or model runtimes are included.
+HA AI Studio runs configured Actions and uses them to update virtual Devices. Each Device can publish multiple named measurements to Home Assistant through MQTT Discovery and refresh them on an interval. Home Assistant retains long-term history and owns follow-up automations. No workflow chains or template mapping engine are included.
 
 ## Local development
 
@@ -12,7 +12,7 @@ Open http://localhost:8099. Add real MQTT brokers in **Settings**, then create a
 
 Local state persists in private `.dev-data`, excluded from builds/packages. `.env` is optional: copy `.env.example` and supply `DEV_MQTT_HOST`, port, username, password and TLS to add a read-only broker. Recreate the container after changes. No HA API token is needed. Production discovers HA's MQTT service through Supervisor only when available; otherwise add a broker manually. MQTT v5 brokers are required. No simulation fallback exists.
 
-Optional **Settings → edit broker → Enable MQTT Discovery** announces Studio and configured Actions with availability and diagnostic entities. Explicitly select the broker used by HA and enable discovery; Input and Output remain independent.
+Optional **Settings → edit broker → Enable MQTT Discovery** publishes only explicitly opted-in virtual Devices and their measurement/diagnostic sensors. Actions and Studio itself are not advertised as devices. Previously owned Action/Studio discovery topics are durably removed before new device publication. Input and Output remain independent.
 
 The frontend design system, build layout and isolated browser checks are documented in [frontend development](ha_ai_studio/frontend/README.md). The production frontend is built inside Docker and served by the Python backend in the same container.
 
@@ -81,3 +81,23 @@ The security check downloads public advisory databases and requires Internet acc
 Actual Supervisor/Ingress authentication and install/upgrade acceptance still require a separate Home Assistant test installation. The local subpath proxy does not verify HA authentication. No live HA installation is changed by these scripts.
 
 The runtime uses the official Ubuntu 24.04 LTS container base, pinned by digest. Only Python, virtual-environment support and CA certificates are installed, without recommended packages. App dependencies live in `/opt/venv`; Ubuntu manages the system Python. Support remains limited to amd64.
+
+## Virtual devices
+
+Devices are the start page. Create a named Device without a preset device type, then compose it from up to 16 number or text readings. Each measurement selects an Action and a named reading; multiple measurements can share an Action. A device invokes each distinct Action once per update, serializes shared Action execution, and preserves successful measurements when another Action fails. Sensors have no predefined measurement type. Set a free unit, optionally mark a cumulative counter (value must not decrease), and optionally provide an HA `device_class` identifier in the Home Assistant metadata section. Studio treats this identifier as publication metadata and does not apply domain-specific rules. Counters use `total_increasing`; other numeric sensors use `measurement`. For HA water statistics, use unit `m³`, the counter option and HA metadata `water`.
+
+Configure the camera, illumination and other input sources in the Action settings. Camera tests and device runs set dimmable illumination to 100% for capture, then restore the prior brightness and on/off state. Restoration is journaled for retry after failures or restart; switches and on/off-only lights retain their on/off behavior. Device measurement Actions must accept an empty input object and return named readings in their successful result data:
+
+```json
+{"readings": [{"id": "main", "status": "read", "value": 123.456, "unit": "m³"}]}
+```
+
+The existing Analog Meter Reader uses this contract. The UI offers its configured meter names; other compatible Actions use their documented reading ID. Device execution never uses documentation example payloads. If an Action declares a `previous` input property, Studio supplies the device's last accepted values and elapsed time for those readings.
+
+**Save draft** does not change running configuration. **Activate device** snapshots the selected Actions' active configurations (or their drafts when MQTT is inactive), including bound source versions. Actions do not need MQTT activation for Device use. Deactivate dependent devices before reloading a local Action source. Saved device bindings protect referenced private images. Deleting a referenced Action is blocked until its device references are removed.
+
+The device interval is 1–10080 minutes, measured from completion to the next update. Activation schedules the first reading after one interval; **Read now** runs the active configuration immediately. Missed intervals produce at most one current measurement, never a catch-up queue. Interrupted work is recorded and not replayed; a fresh measurement is scheduled after the next interval. Readings accept finite numbers or nonblank text of up to 255 characters. Text is preserved exactly, including leading zeros; configure an empty unit and HA device class and disable numeric checks for text. Only numeric values receive a statistics state class and are passed back as previous numeric readings. A sensor cannot switch between number and text after its first accepted reading; use a new sensor ID to protect history. The device sensor owns the unit; Action output units are ignored and values are not converted. Cumulative counter values cannot decrease or be negative; optionally set a maximum change per reading. A meter replacement requires a new sensor ID. Removed sensor IDs retain their previous values and publication metadata/unit constraints to protect historical statistics if reused.
+
+Publication is a separate per-device opt-in and requires central Discovery to be enabled. Every published device has measurement, last-successful-reading timestamp and per-sensor status entities, plus device status. No root Studio device or Action devices are advertised. A disabled device remains visible with disabled diagnostics and its last accepted values. Last values and exact owned MQTT topics persist across restart. Discovery configuration and state snapshots are retained and replayed after HA birth/reconnect; Action request/result envelopes remain QoS 1, retain off. Failed publication retries without rerunning the Action. MQTT delivery is not exactly-once.
+
+Deleting a device preserves its private stored record and queues exact-topic Discovery cleanup. Cleanup survives broker outages/restarts and must finish before broker/prefix migration; unrelated topics are never deleted. Home Assistant owns long-term statistics; Studio only keeps the latest accepted values and bounded Action execution records. Live HA authentication, actual HA entity registration and production TLS require separate integration validation.

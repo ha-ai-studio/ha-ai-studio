@@ -87,6 +87,20 @@ def create_app(root=None, dev=None):
             return web.json_response(read(studio.get(request.query.get('id')),request.query.get('run','')))
         if action=='ha-entities' and request.method=='GET':
             return web.json_response(await studio.home_assistant.search(request.query.get('domains','camera,light,switch').split(','),request.query.get('q','')))
+        if action == 'devices':
+            if request.method == 'GET':return web.json_response(studio.devices.list())
+            if request.method == 'POST':return web.json_response(studio.devices.create(await request.json()))
+        if action == 'delete-device' and request.method == 'POST':
+            return web.json_response(studio.devices.delete(await request.json()))
+        if action in ('device', 'device-deactivate', 'device-read'):
+            id = request.query.get('id')
+            if request.method == 'GET' and action == 'device':return web.json_response(studio.devices.public(id))
+            if request.method == 'POST':
+                if action == 'device':result = await studio.devices.save(id, await request.json())
+                elif action == 'device-deactivate':result = studio.devices.deactivate(id)
+                else:result = studio.devices.start_read(id)
+                return web.json_response(result)
+            raise web.HTTPMethodNotAllowed(request.method, ['POST'])
         if action == 'repositories':
             if request.method=='GET':return web.json_response(studio.repositories.public())
             if request.method=='POST':return web.json_response(await studio.repositories.save(await request.json()))

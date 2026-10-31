@@ -198,6 +198,11 @@ export function BrokerPanel({
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
           />
+          <p className="small muted">
+            Only explicitly published virtual Devices and their sensors are
+            announced. Actions remain internal. Old owned Action discovery
+            entries are cleaned up automatically.
+          </p>
           {discovery.config.enabled &&
             discovery.config.broker_id !== editing?.id && (
               <p className="small muted">

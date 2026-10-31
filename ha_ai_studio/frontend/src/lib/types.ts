@@ -106,6 +106,11 @@ export interface LiveData {
   events: LiveEvent[];
 }
 export interface ApiResponses {
+  devices: { devices: DeviceState[] };
+  device: DeviceState;
+  "device-read": DeviceState;
+  "device-deactivate": DeviceState;
+  "delete-device": { devices: DeviceState[] };
   actions: { actions: ActionState[]; types: ActionType[] };
   action: ActionState;
   deactivate: ActionState;
@@ -122,4 +127,43 @@ export interface ApiResponses {
   "delete-action": unknown;
   test: { mode: string; delivery: string; result: Json };
   live: LiveData;
+}
+
+export interface DeviceSensor {
+  id: string;
+  name: string;
+  cumulative: boolean;
+  device_class: string;
+  unit: string;
+  action_id: string;
+  reading: string;
+  max_change: number | null;
+}
+export interface DeviceConfig {
+  name: string;
+  interval_minutes: number;
+  publish: boolean;
+  sensors: DeviceSensor[];
+}
+export interface DeviceState {
+  id: string;
+  identity: string;
+  draft: DeviceConfig;
+  active: DeviceConfig | null;
+  enabled: boolean;
+  busy: boolean;
+  status: string;
+  publication: string;
+  issue: string | null;
+  last_attempt: string | null;
+  next_run: number | null;
+  values: Record<
+    string,
+    {
+      value?: number | string;
+      timestamp?: string;
+      status: string;
+      error?: string;
+    }
+  >;
 }

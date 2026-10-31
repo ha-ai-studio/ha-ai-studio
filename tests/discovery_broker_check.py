@@ -14,6 +14,7 @@ import paho.mqtt.client as mqtt
 from app.actions import Studio
 from app.discovery import DEFAULT
 from test_actions import broker
+from test_devices import configured_device, sensor, reading
 
 
 async def main():
@@ -46,17 +47,26 @@ async def main():
         config=copy.deepcopy(service.config['draft']);config['input']={'broker_id':ids[0],'topic':'discovery-check/request'};config['output']={'broker_id':ids[1],'topic':'discovery-check/result'}
         await service.save(config,True)
         await studio.discovery.save({**DEFAULT,'enabled':True,'broker_id':ids[2]})
+        device=await configured_device(studio,[sensor(action='echo'),sensor('serial',action='echo',kind='number',unit='')],publish=True)
+        prefix=device['identity']
         await studio.start()
         status=f'homeassistant/sensor/{prefix}/status/config';availability=namespace+'/discovery/availability'
         await until(lambda:any(h=='broker3' and t==availability and p==b'online' for h,t,p,r in seen))
         assert not any(h!='broker3' and (t.startswith('homeassistant/') or t==prefix+'/status') for h,t,p,r in seen)
         configs={t:json.loads(p) for h,t,p,r in seen if h=='broker3' and t.endswith('/config') and p}
-        assert len(configs)==3
+        assert len(configs)==7
         assert configs[status]['unique_id']==prefix+'_status'
         await until(lambda:service.mqtt and service.mqtt.ready.is_set())
         await publish(a,'discovery-check/request',json.dumps({'request_id':'production','data':{'private':'DO-NOT-ANNOUNCE'}}))
         await until(lambda:service.last and service.last['delivery']=='published')
-        await until(lambda:any(t==prefix+'/delivery' and p==b'published' for h,t,p,r in seen))
+        assert not any(service.identity['prefix'] in t for h,t,p,r in seen if t.endswith('/config'))
+        from unittest.mock import AsyncMock
+        with patch.object(service,'execute',AsyncMock(return_value={'readings':[reading(),reading('serial','000123-AB','')]})):
+            studio.devices.start_read(device['id']);await studio.devices.tasks[device['id']]
+        await until(lambda:any(t==prefix+'/value_water' and p==b'123' for h,t,p,r in seen))
+        await until(lambda:any(t==prefix+'/value_serial' and p==b'000123-AB' for h,t,p,r in seen))
+        serial_config=studio.discovery.desired()[f'homeassistant/sensor/{prefix}/value_serial/config']
+        assert 'state_class' not in serial_config and 'unit_of_measurement' not in serial_config
         assert not any(b'DO-NOT-ANNOUNCE' in p for h,t,p,r in seen if h=='broker3')
         before=copy.deepcopy(service.last);await service.test(config,'{"request_id":"ui","data":0}')
         assert before==service.last
@@ -67,14 +77,16 @@ async def main():
         await publish(c,'homeassistant/status','online',True)
         await until(lambda:sum(t==status for h,t,p,r in seen)>count)
         count=sum(t==status for h,t,p,r in seen)
-        await until(lambda:any(t==prefix+'/status' and p==b'success' for h,t,p,r in seen[birth_start:]))
+        await until(lambda:any(t==prefix+'/status' and p==b'ready' for h,t,p,r in seen[birth_start:]))
         reconnect_start=len(seen)
         # Force an actual TCP loss. Paho reconnects and the manager republishes.
         await asyncio.to_thread(studio.discovery.client.client._sock_close)
         await until(lambda:sum(t==status for h,t,p,r in seen)>count)
-        await until(lambda:any(t==prefix+'/status' and p==b'success' for h,t,p,r in seen[reconnect_start:]))
-        config['name']='Renamed';await service.save(config,False)
+        await until(lambda:any(t==prefix+'/status' and p==b'ready' for h,t,p,r in seen[reconnect_start:]))
+        device_config=copy.deepcopy(device['draft']);device_config['name']='Renamed'
+        await studio.devices.save(device['id'],{'config':device_config,'activate':True})
         await until(lambda:any(t==status and b'Renamed' in p for h,t,p,r in seen))
+        studio.devices.deactivate(device['id'])
         await service.deactivate()
         await until(lambda:any(t==prefix+'/status' and p==b'disabled' for h,t,p,r in seen))
         close_start=len(seen)
@@ -83,6 +95,7 @@ async def main():
         studio=Studio(root);service=studio.get('echo');await studio.start()
         await until(lambda:studio.discovery.status.startswith('Connected'))
         assert studio.discovery.desired()[status]['unique_id']==configs[status]['unique_id']
+        studio.devices.delete({'id':device['id'],'confirmed':True})
         await studio.delete({'id':'echo','confirmed':True})
         await until(lambda:any(t==status and p==b'' for h,t,p,r in seen))
         # Switch to B, verify old broker clears only our topics and Studio exists with zero Actions.

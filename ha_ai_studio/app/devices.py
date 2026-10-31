@@ -1,0 +1,308 @@
+"""Virtual devices: independent measurements, durable schedules and stable identities."""
+import asyncio
+import copy
+import json
+import math
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from contextlib import AsyncExitStack
+from .domain import Invalid
+from .store import Store
+
+def migrate_sensor_profiles(data):
+    """Preserve existing HA identities/metadata while removing Studio-specific types."""
+    legacy = {'water': ('water', True), 'temperature': ('temperature', False),
+              'humidity': ('humidity', False), 'number': ('', False)}
+    for item in [*data['items'].values(), *data['deleted']]:
+        for config in (item['draft'], item['active']):
+            if not config:continue
+            config.pop('type', None)  # Early development drafts had a device preset.
+            for sensor in config['sensors']:
+                if 'kind' in sensor:
+                    device_class, cumulative = legacy[sensor.pop('kind')]
+                    sensor.update(device_class=device_class, cumulative=cumulative)
+        for key, semantics in item['sensor_identities'].items():
+            if len(semantics) == 2:
+                device_class, cumulative = legacy[semantics[0]]
+                item['sensor_identities'][key] = [device_class, semantics[1], cumulative]
+
+
+def timestamp(value=None):
+    return datetime.fromtimestamp(time.time() if value is None else value, timezone.utc).isoformat()
+
+
+def name(value):
+    return isinstance(value, str) and 0 < len(value.strip()) <= 80 and not any(ord(c) < 32 for c in value)
+
+
+def identifier(value):
+    return isinstance(value, str) and re.fullmatch('[a-z][a-z0-9-]{0,47}', value)
+
+
+class Devices:
+    def __init__(self, studio):
+        self.studio = studio
+        self.store = Store(studio.store.root / 'devices')
+        self.data = self.store.read('devices.json', {'items': {}, 'deleted': []})
+        migrate_sensor_profiles(self.data)
+        self.tasks = {}
+        self.editing = set()
+        self.task = None
+        self.stopping = False
+        self.error = None
+        for item in self.data['items'].values():
+            if item['status'] == 'running':
+                item['status'] = 'interrupted'
+                item['next_run'] = time.time() + (item['active'] or item['draft'])['interval_minutes'] * 60
+        self.commit(self.data)
+
+    def commit(self, candidate):
+        self.store.write('devices.json', candidate)
+        self.data = candidate
+
+    def get(self, id):
+        if not isinstance(id, str) or id not in self.data['items']:
+            raise Invalid('Device not found.')
+        return self.data['items'][id]
+
+    def busy(self, id):
+        return id in self.tasks and not self.tasks[id].done()
+
+    def public(self, id):
+        item = self.get(id)
+        result = {k: copy.deepcopy(item[k]) for k in ('id', 'identity', 'draft', 'active', 'enabled', 'values', 'status', 'last_attempt', 'next_run')}
+        result['busy'] = self.busy(id)
+        result['issue'] = self.error
+        result['publication'] = self.studio.discovery.status if item['active'] and item['active']['publish'] else 'Not published'
+        return result
+
+    def list(self):
+        return {'devices': [self.public(id) for id in self.data['items']]}
+
+    def references(self, action_id, active_only=False):
+        for item in self.data['items'].values():
+            configs = [item['active']] if active_only else [item['draft'], item['active']]
+            if active_only and not item['enabled']:
+                continue
+            if any(c and any(s['action_id'] == action_id for s in c['sensors']) for c in configs):
+                return True
+        return False
+
+    def action_configs(self, action_id):
+        items = [*self.data['items'].values(), *self.data['deleted']]
+        return [item['bindings'][action_id]['config'] for item in items if action_id in item['bindings']]
+
+    def create(self, value):
+        if not isinstance(value, dict) or set(value) != {'name'} or not name(value['name']):
+            raise Invalid('Provide a device name.')
+        if len(self.data['items']) >= 32:
+            raise Invalid('Maximum of 32 devices.')
+        id = 'device-' + uuid.uuid4().hex[:16]
+        config = {'name': value['name'].strip(), 'interval_minutes': 30,
+                  'publish': False, 'sensors': []}
+        candidate = copy.deepcopy(self.data)
+        candidate['items'][id] = {'id': id, 'identity': self.studio.namespace + '_' + id,
+            'draft': config, 'active': None, 'enabled': False, 'bindings': {}, 'values': {},
+            'status': 'disabled', 'last_attempt': None, 'next_run': None, 'sensor_identities': {}}
+        self.commit(candidate)
+        return self.public(id)
+
+    def validate(self, config):
+        if not isinstance(config, dict) or set(config) != {'name', 'interval_minutes', 'publish', 'sensors'}:
+            raise Invalid('Provide the complete device configuration.')
+        if not name(config['name']):
+            raise Invalid('Invalid device name.')
+        if type(config['interval_minutes']) is not int or not 1 <= config['interval_minutes'] <= 10080:
+            raise Invalid('Update interval must be 1–10080 whole minutes.')
+        if type(config['publish']) is not bool or not isinstance(config['sensors'], list) or len(config['sensors']) > 16:
+            raise Invalid('Provide publication and up to 16 sensors.')
+        ids = set()
+        for sensor in config['sensors']:
+            if not isinstance(sensor, dict) or set(sensor) != {'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change'}:
+                raise Invalid('Provide the complete sensor definition.')
+            if not identifier(sensor['id']) or sensor['id'] in ids or not name(sensor['name']):
+                raise Invalid('Sensor IDs must be unique lowercase names; provide a sensor name.')
+            ids.add(sensor['id'])
+            if not identifier(sensor['reading']):
+                raise Invalid('Select a named action reading.')
+            if type(sensor['cumulative']) is not bool:
+                raise Invalid('Specify whether this is a cumulative counter.')
+            if not isinstance(sensor['device_class'], str) or (sensor['device_class'] and not re.fullmatch('[a-z][a-z0-9_]{0,63}', sensor['device_class'])):
+                raise Invalid('Use a Home Assistant device class identifier or leave it empty.')
+            if not isinstance(sensor['unit'], str) or len(sensor['unit']) > 24 or any(ord(c) < 32 for c in sensor['unit']):
+                raise Invalid('Use a unit of up to 24 characters.')
+            maximum = sensor['max_change']
+            if maximum is not None and (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum <= 0):
+                raise Invalid('Maximum change must be a positive finite number or empty.')
+            action = self.studio.get(sensor['action_id'])
+            if not action.supported:
+                raise Invalid('Select a supported action.')
+        return copy.deepcopy(config)
+
+    async def save(self, id, value):
+        self.get(id)
+        if id in self.editing:raise Invalid('Device configuration is being saved.')
+        self.editing.add(id)
+        try:return await self._save(id, value)
+        finally:self.editing.discard(id)
+
+    async def _save(self, id, value):
+        if not isinstance(value, dict) or set(value) != {'config', 'activate'} or type(value['activate']) is not bool:
+            raise Invalid('Provide device configuration and activation.')
+        async with self.studio.brokers.lock, AsyncExitStack() as locks:
+            if self.busy(id):raise Invalid('Device is measuring. Wait for completion.')
+            current = self.get(id)
+            config = self.validate(value['config'])
+            bindings = {}
+            semantics_by_id = copy.deepcopy(current['sensor_identities'])
+            if value['activate']:
+                if not config['sensors']:raise Invalid('Add at least one sensor before activation.')
+                if config['publish'] and not self.studio.discovery.data['config']['enabled']:
+                    raise Invalid('Enable central Home Assistant discovery in Settings before publishing devices.')
+                for action_id in sorted({s['action_id'] for s in config['sensors']}):
+                    await locks.enter_async_context(self.studio.get(action_id).lock)
+                for sensor in config['sensors']:
+                    old = semantics_by_id.get(sensor['id'])
+                    semantics = [sensor['device_class'], sensor['unit'], sensor['cumulative']]
+                    if old and old != semantics:raise Invalid('A sensor’s published metadata and counter behavior cannot change. Add a new sensor ID instead.')
+                    semantics_by_id[sensor['id']] = semantics
+                    action = self.studio.get(sensor['action_id'])
+                    if action.environment:action.environment.require()
+                    action_config = await action.check_config(action.config['active'] if action.enabled else action.config['draft'])
+                    from .actions import parse
+                    _, error = await parse(json.dumps({'request_id':'device-validation','data':{}}), action.plugin)
+                    if error:raise Invalid('Device actions must accept an empty input object; configure their source in Action settings.')
+                    bindings[sensor['action_id']] = {'config': action_config,
+                        'plugin': copy.deepcopy(action.plugin.record) if action.environment else None}
+            candidate = copy.deepcopy(self.data)
+            item = candidate['items'][id]
+            item['draft'] = config
+            item['sensor_identities'] = semantics_by_id
+            if value['activate']:
+                item.update(active=copy.deepcopy(config), enabled=True, bindings=bindings,
+                            status='ready', next_run=time.time() + config['interval_minutes'] * 60)
+            # Validate new discovery topics before committing device activation.
+            previous = self.data
+            self.data = candidate
+            try:self.studio.brokers.check_topology()
+            finally:self.data = previous
+            self.commit(candidate)
+        return self.public(id)
+
+    def deactivate(self, id):
+        if id in self.editing:raise Invalid('Device configuration is being saved.')
+        if self.busy(id):raise Invalid('Device is measuring. Wait for completion.')
+        self.get(id)
+        candidate = copy.deepcopy(self.data)
+        candidate['items'][id].update(enabled=False, status='disabled', next_run=None)
+        self.commit(candidate)
+        return self.public(id)
+
+    def delete(self, value):
+        if not isinstance(value, dict) or set(value) != {'id', 'confirmed'} or value['confirmed'] is not True:
+            raise Invalid('Confirm device deletion.')
+        id = value['id'];self.get(id)
+        if id in self.editing:raise Invalid('Device configuration is being saved.')
+        if self.busy(id):raise Invalid('Device is measuring. Wait for completion.')
+        candidate = copy.deepcopy(self.data)
+        candidate['deleted'].append(candidate['items'].pop(id))
+        self.commit(candidate)
+        return self.list()
+
+    def start_read(self, id):
+        item = self.get(id)
+        if self.error:raise Invalid(self.error)
+        if id in self.editing:raise Invalid('Device configuration is being saved.')
+        if not item['enabled'] or not item['active']:raise Invalid('Activate the device before reading.')
+        if self.busy(id):raise Invalid('Device is already measuring.')
+        candidate = copy.deepcopy(self.data)
+        candidate['items'][id].update(status='running', last_attempt=timestamp(),
+            next_run=time.time() + item['active']['interval_minutes'] * 60)
+        self.commit(candidate)  # Durable intent before any action, including restart interruption.
+        self.tasks[id] = asyncio.create_task(self.measure(id))
+        return self.public(id)
+
+    async def measure(self, id):
+        item = copy.deepcopy(self.get(id))
+        config = item['active']
+        values = copy.deepcopy(item['values'])
+        successes = 0
+        try:
+            for action_id, binding in item['bindings'].items():
+                sensors = [s for s in config['sensors'] if s['action_id'] == action_id]
+                try:
+                    action = self.studio.get(action_id)
+                    if action.environment and action.plugin.record != binding['plugin']:
+                        raise Invalid('Action source changed. Reactivate the device.')
+                    data = {}
+                    # Meter actions accept prior readings for their own rate/confirmation checks.
+                    if 'previous' in action.plugin.metadata.get('input_schema', {}).get('properties', {}).get('data', {}).get('properties', {}):
+                        data['previous'] = {s['reading']: {'value': values[s['id']]['value'],
+                            'elapsed_seconds': max(.001, time.time() - values[s['id']]['measured_at'])}
+                            for s in sensors if s['id'] in values and type(values[s['id']].get('value')) in (int, float)}
+                    result = await action.internal_request('device-' + uuid.uuid4().hex, data, binding['config'])
+                    if result.get('status') != 'success':raise Invalid('Action execution failed.')
+                    output = result['data']
+                    readings = output.get('readings') if isinstance(output, dict) else None
+                    if not isinstance(readings, list):raise Invalid('Action must return a readings array.')
+                    for sensor in sensors:
+                        try:
+                            matches = [r for r in readings if isinstance(r, dict) and r.get('id') == sensor['reading']]
+                            if len(matches) != 1:raise Invalid('Named reading is missing or duplicated.')
+                            reading = matches[0];value = reading.get('value')
+                            numeric = type(value) in (int, float)
+                            textual = isinstance(value, str)
+                            if reading.get('status') != 'read' or not (numeric or textual):
+                                raise Invalid('Action did not return a valid number or text reading.')
+                            if numeric and not math.isfinite(value):
+                                raise Invalid('Action returned a non-finite number.')
+                            if textual and (not value.strip() or len(value) > 255):
+                                raise Invalid('Text readings must contain 1–255 characters and must not be blank.')
+                            if textual and (sensor['unit'] or sensor['device_class'] or sensor['cumulative'] or sensor['max_change'] is not None):
+                                raise Invalid('Text readings require an empty unit and HA device class, with counter and maximum-change checks disabled.')
+                            previous = values.get(sensor['id'], {}).get('value')
+                            if previous is not None and isinstance(previous, str) != textual:
+                                raise Invalid('Reading changed between number and text. Use a new sensor ID to preserve Home Assistant history.')
+                            if numeric:
+                                if sensor['cumulative'] and (value < 0 or previous is not None and value < previous):
+                                    raise Invalid('Counter reading decreased or is negative. Check the reading or configure a new sensor for a replacement counter.')
+                                if previous is not None and sensor['max_change'] is not None and abs(value - previous) > sensor['max_change']:
+                                    raise Invalid('Reading exceeds the maximum change.')
+                            now = time.time()
+                            values[sensor['id']] = {'value': value, 'measured_at': now, 'timestamp': timestamp(now), 'status': 'ready', 'error': None}
+                            successes += 1
+                        except Invalid as exc:
+                            values.setdefault(sensor['id'], {}).update(status='error', error=str(exc))
+                except Exception:
+                    for sensor in sensors:values.setdefault(sensor['id'], {}).update(status='error', error='Action failed or returned an unsupported reading. Check its configuration.')
+                # Preserve completed independent measurements if a later action is interrupted.
+                candidate = copy.deepcopy(self.data)
+                candidate['items'][id]['values'] = copy.deepcopy(values)
+                self.commit(candidate)
+            candidate = copy.deepcopy(self.data)
+            candidate['items'][id].update(status='ready' if successes == len(config['sensors']) else 'partial' if successes else 'error',
+                next_run=time.time() + config['interval_minutes'] * 60)
+            self.commit(candidate)
+        except asyncio.CancelledError:
+            raise  # Persisted running intent is recovered as interrupted, never replayed.
+        except Exception:
+            self.error = 'Device persistence failed. Automatic measurements are paused; restart after resolving storage.'
+
+    async def run(self):
+        while not self.stopping:
+            if not self.error:
+                try:
+                    for id, item in list(self.data['items'].items()):
+                        if item['enabled'] and item['next_run'] is not None and item['next_run'] <= time.time() and not self.busy(id) and id not in self.editing:
+                            self.start_read(id)
+                except Exception:self.error = 'Device scheduler failed. Automatic measurements are paused; check storage and restart.'
+            await asyncio.sleep(.5)
+
+    async def close(self):
+        self.stopping = True
+        if self.task:await self.task
+        for task in self.tasks.values():
+            if not task.done():task.cancel()
+        await asyncio.gather(*self.tasks.values(), return_exceptions=True)

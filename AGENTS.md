@@ -1,8 +1,8 @@
 # Project rules
 
 ## Product and UI
-- Home Assistant owns triggers, schedules, conditions and follow-up actions. This app executes individual configured Actions, not workflows.
-- The Actions table is the main page. Create action opens a right-hand side panel with name and action type. Editing opens a separate configuration page with Input, type settings and Output. No workflow diagram, mappings, templates or activity chains.
+- Home Assistant owns automation conditions and follow-up actions. Studio schedules independent measurement Actions for explicitly configured virtual Devices; it does not execute workflows. Each Device may have multiple sensors backed by different Actions.
+- The Devices table is the main page; Actions remain a separate page. Create action opens a right-hand side panel with name and action type. Editing opens a separate configuration page with Input, type settings and Output. No workflow diagram, mappings, templates or activity chains.
 - New Echo instances come from the separate ha-ai-studio-actions-core Git repository. The original Echo runtime under `ha_ai_studio/app/action_types/legacy_echo/` is compatibility-only for saved instances and is not offered for creation. Trusted Git action types use validated manifests, a schema editor and a separate per-instance venv runner. Local development sources follow the Local Action development rules below.
 - Keep the Home Assistant visual style: HA blue, compact navigation, plain cards and clear textual states. All UI, errors, protocol diagnostics and documentation must be English.
 - Use only the embedded Codex browser (IAB) for interactive and visual testing; reuse the existing tab. No external Playwright, Chrome or Safari.
@@ -26,7 +26,7 @@
 
 ## Optional Home Assistant discovery
 - Central Discovery is explicitly enabled on one selected broker, independent of Action routes; never publish discovery automatically from Input connections.
-- Preserve stored identities and existing status unique IDs. Only advertise supported configured instances; disabled remains a diagnostic state.
+- Advertise only explicitly published virtual Devices and their sensors, never Actions or a Studio diagnostic device. Preserve Device identities and sensor unique IDs. Durably clean up exact owned legacy Action/Studio discovery topics; disabled Devices remain diagnostic states.
 - Persist exact owned topics before publication. Empty retained cleanup must be durable, scoped to owned topics, and retried before broker/prefix migration completes.
 - Keep private broker connection snapshots for pending cleanup; protect referenced broker deletion/endpoint edits. Never expose snapshots or payloads in diagnostics or browser responses.
 - Reject Action routes overlapping discovery/configuration/state/HA-birth topics, including cached retry destinations. Publish request/result messages with retain off.

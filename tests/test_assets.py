@@ -42,6 +42,18 @@ class AssetsTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close();await self.studio.close();self.tmp.cleanup()
     async def post(self,name,body,ident='first'):
         return await self.client.post('/api/'+name+'?id='+ident,json=body,headers={'X-HA-AI-Studio-Request':'1'})
+    async def test_device_snapshot_protects_reference_before_first_execution(self):
+        from test_devices import configured_device, sensor
+        service=self.studio.get('first')
+        asset=await service.assets.upload({'base64':base64.b64encode(PNG).decode()})
+        config=copy.deepcopy(service.config['draft']);config['settings']={'reference':asset['id']}
+        await service.save(config,False)
+        await configured_device(self.studio,[sensor(action='first')])
+        config['settings']={};await service.save(config,False)
+        self.assertFalse(service.jobs)
+        with self.assertRaises(Invalid):await service.assets.delete({'id':asset['id']})
+        self.assertTrue(service.assets.path(asset['id']).exists())
+
     async def test_upload_immutable_private_and_scope(self):
         response=await self.post('action-asset',{'base64':base64.b64encode(PNG).decode()});self.assertEqual(response.status,200)
         value=await response.json();self.assertEqual(value['width'],1)

@@ -263,6 +263,7 @@ it("missing examples disable HA template while zero-valued examples work", async
 });
 it("create, edit, dirty guard, activate, deactivate and delete use the real React handlers with mocked transport", async () => {
   const mock = mockApi();
+  history.replaceState(null, "", "#actions");
   render(<App />);
   await userEvent.click(
     await screen.findByRole("button", { name: "Create action" }),

@@ -50,3 +50,9 @@ Use the embedded Codex browser at `http://localhost:8101/api/hassio_ingress/ui-c
 The public source archive uses the explicit `FRONTEND_FILES` allowlist in `scripts/package.py`. Register new build inputs there; do not package `node_modules`, captures, local configuration or private data. Runtime dependency notices are in `../THIRD_PARTY.md`.
 
 To also verify the meter example's real custom editor modules in the synthetic fixture, add `-v "$PWD/../ha-ai-studio-actions-ai-on-the-edge-meters:/fixture-meter:ro"` to the fixture container command. This enables the local-source form and a synthetic meter Action type. The fixture only reads public example UI files; it never starts the real Action runner or connects to MQTT.
+
+### Virtual Device browser checks
+
+Start the disposable fixture with `docker compose -p studio-device-preview -f tests/compose.ui.yaml up -d --build` from the repository root. Use only the embedded browser at `http://localhost:8101`; the Ingress path proxy is `http://localhost:8102/api/hassio_ingress/dev-check/`. The fixture contains two synthetic measurement Actions, a custom editor with a relative JavaScript import, and a compatibility Echo for isolated draft preview. It never mounts development data or HA credentials, never starts Action MQTT subscriptions or Discovery, and rejects any attempted MQTT connection. Device activation/Read now affect synthetic fixture state only. Restarting the fixture discards its data.
+
+Check name-only device creation, separate Action assignments for multiple sensors, saved draft versus active configuration, activation, Read now, deactivation, deletion, and desktop/tablet layout. Verify plugin editor imports under the Ingress prefix. Broker/discovery tests are separate real-MQTT tests on disposable brokers; these checks do not validate live HA authentication or production TLS.

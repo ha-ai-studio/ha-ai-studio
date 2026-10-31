@@ -7,6 +7,7 @@ from app.actions import Studio
 from app.discovery import DEFAULT
 from app.domain import Invalid
 from test_actions import broker
+from test_devices import configured_device, sensor
 
 
 class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -19,78 +20,43 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.broker = (await self.studio.brokers.save(broker()))['brokers'][0]['id']
         self.d = self.studio.discovery
         self.config = {**DEFAULT, 'enabled': True, 'broker_id': self.broker}
+        await self.studio.create({'id':'reader','name':'Reader','type':'echo'})
+        await self.d.save(self.config)
+        self.device = await configured_device(self.studio, publish=True)
+        self.prefix = self.device['identity']
 
     async def asyncTearDown(self):
         await self.studio.close()
         self.tmp.cleanup()
 
-    async def test_optional_no_actions_and_explicit_selection(self):
+    async def test_only_explicit_devices_and_stable_ids(self):
+        desired=self.d.desired()
+        entities=[p for t,p in desired.items() if t.endswith('/config')]
+        self.assertEqual(len(entities),4)
+        self.assertTrue(all(p['device']['identifiers']==[self.prefix] for p in entities))
+        self.assertFalse(any('active_actions' in t for t in desired))
+        self.assertFalse(any(self.studio.get('reader').identity['prefix'] in t for t in desired))
+        config=copy.deepcopy(self.device['draft']);config['name']='Renamed'
+        await self.studio.devices.save(self.device['id'],{'config':config,'activate':False})
+        self.assertEqual(self.d.desired(),desired)
+        await self.studio.devices.save(self.device['id'],{'config':config,'activate':True})
+        self.assertEqual(set(self.d.desired()),set(desired))
+        restored=Studio(self.tmp.name)
+        self.assertEqual(restored.discovery.desired(),self.d.desired())
+        self.assertEqual(restored.get('reader').identity,self.studio.get('reader').identity)
+        await restored.close()
+        with tempfile.TemporaryDirectory() as other_root:
+            other=Studio(other_root)
+            self.assertTrue(set(self.d.desired()).isdisjoint(other.discovery.desired()))
+            await other.close()
+
+    async def test_no_devices_no_entities(self):
+        self.studio.devices.delete({'id':self.device['id'],'confirmed':True})
+        self.assertFalse(any(t.endswith('/config') for t in self.d.desired()))
+        await self.d.save(dict(DEFAULT))
         with patch('app.discovery.MQTT') as mqtt:
             await self.d.reconcile();mqtt.assert_not_called()
         with self.assertRaises(Invalid):await self.d.save({**DEFAULT,'enabled':True})
-        await self.d.save(self.config)
-        desired=self.d.desired()
-        configs=[p for t,p in desired.items() if t.endswith('/config')]
-        self.assertEqual(len(configs),1)
-        self.assertEqual(configs[0]['device']['name'],'HA AI Studio · '+self.studio.instance_id)
-        self.assertEqual(desired[self.studio.namespace+'/discovery/active_actions'],'0')
-
-    async def test_instance_identity_persists_and_isolates_installations(self):
-        await self.studio.create({'id':'same','name':'Same action','type':'echo'})
-        initial=self.d.desired()
-        restored=Studio(self.tmp.name)
-        self.assertEqual(restored.instance_id,self.studio.instance_id)
-        self.assertEqual(restored.discovery.desired(),initial)
-        self.assertEqual(restored.discovery.public()['instance_id'],self.studio.instance_id)
-        with tempfile.TemporaryDirectory() as other_root:
-            other=Studio(other_root)
-            await other.create({'id':'same','name':'Same action','type':'echo'})
-            self.assertNotEqual(other.instance_id,self.studio.instance_id)
-            self.assertTrue(set(initial).isdisjoint(other.discovery.desired()))
-            own=[v for k,v in initial.items() if k.endswith('/config')]
-            foreign=[v for k,v in other.discovery.desired().items() if k.endswith('/config')]
-            self.assertTrue({v['unique_id'] for v in own}.isdisjoint(v['unique_id'] for v in foreign))
-            self.assertTrue({tuple(v['device']['identifiers']) for v in own}.isdisjoint(tuple(v['device']['identifiers']) for v in foreign))
-            for v in own:self.assertIn(self.studio.instance_id,v['device']['name'])
-            for v in foreign:self.assertIn(other.instance_id,v['device']['name'])
-            await other.close()
-        await restored.close()
-
-    async def test_existing_installation_adopts_identity_without_changing_routes(self):
-        original={'prefix':'studio_existing','device_id':'original-device'}
-        self.studio.store.write('identity.json',original)
-        restored=Studio(self.tmp.name)
-        self.assertEqual(restored.instance_id,original['prefix'])
-        saved=restored.store.read('identity.json')
-        self.assertEqual(saved,{**original,'instance_id':original['prefix']})
-        desired=restored.discovery.desired()
-        entity=desired['homeassistant/sensor/studio_existing/active_actions/config']
-        self.assertEqual(entity['unique_id'],'studio_existing_active_actions')
-        self.assertEqual(entity['device']['identifiers'],['original-device'])
-        self.assertEqual(Studio(self.tmp.name).instance_id,restored.instance_id)
-        await restored.close()
-
-    async def test_stable_ids_rename_legacy_and_diagnostics(self):
-        await self.studio.create({'id':'echo','name':'First','type':'echo'})
-        service=self.studio.get('echo');prefix=service.identity['prefix']
-        first=self.d.desired();keys=set(first)
-        config=copy.deepcopy(service.config['draft']);config['name']='Renamed'
-        await service.save(config,False)
-        second=self.d.desired();self.assertEqual(keys,set(second))
-        entity=second[f'homeassistant/sensor/{prefix}/status/config']
-        self.assertEqual(entity['unique_id'],prefix+'_status')
-        self.assertEqual(entity['device']['via_device'],self.studio.store.read('identity.json')['device_id'])
-        self.assertTrue(entity['device']['name'].endswith('Renamed'))
-        self.assertEqual(second[prefix+'/status'],'disabled')
-        service.config.update(enabled=True,active=config)
-        service.last={'execution':'success','delivery':'failed','request_id':'PRIVATE','data':'PRIVATE'}
-        desired=self.d.desired();self.assertEqual(desired[prefix+'/status'],'success');self.assertEqual(desired[prefix+'/delivery'],'failed')
-        self.assertNotIn('PRIVATE',json.dumps(desired))
-        service.running=True;self.assertEqual(self.d.desired()[prefix+'/status'],'running');service.running=False
-        await service.test(config,'{"request_id":"UI","data":"PRIVATE"}')
-        self.assertEqual(self.d.desired(),desired)
-        restored=Studio(self.tmp.name);self.assertEqual(restored.get('echo').identity['prefix'],prefix)
-        service.supported=False;self.assertNotIn(prefix+'/status',self.d.desired())
 
     async def test_ownership_before_publish_and_cleanup(self):
         await self.d.save(self.config)
@@ -126,14 +92,13 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         await restored.brokers.delete({'id':self.broker,'confirmed':True})
 
     async def test_delete_only_owned_topics_and_switch(self):
-        await self.studio.create({'id':'echo','name':'First','type':'echo'})
-        prefix=self.studio.get('echo').identity['prefix']
-        await self.d.save(self.config)
+        expected=set(self.d.desired())-{self.studio.namespace+'/discovery/availability'}
         with patch('app.discovery.MQTT') as transport:
             await self.d.reconcile()
-            await self.studio.delete({'id':'echo','confirmed':True});await self.d.reconcile()
+            self.studio.devices.delete({'id':self.device['id'],'confirmed':True})
+            await self.d.reconcile()
             deleted=[c.args[0] for c in transport.return_value.publish.call_args_list if c.args[1]=='']
-            self.assertEqual(set(deleted),{f'homeassistant/sensor/{prefix}/status/config',f'homeassistant/sensor/{prefix}/delivery/config',prefix+'/status',prefix+'/delivery'})
+            self.assertEqual(set(deleted),expected)
             before=set(self.studio.brokers.all());await self.studio.brokers.save(broker('second'));other=(set(self.studio.brokers.all())-before).pop()
             await self.d.save({**self.config,'broker_id':other});await self.d.reconcile()
             self.assertEqual({i['broker_id'] for i in self.d.data['owned']},{other})
@@ -141,17 +106,16 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_prefix_validation_and_legacy_identity_preserved(self):
         for prefix in ('','homeassistant/#','$SYS','bad\n'):
             with self.assertRaises(Invalid):await self.d.save({**self.config,'prefix':prefix})
-        await self.studio.create({'id':'old','name':'Old','type':'echo'})
-        service=self.studio.get('old');service.store.write('identity.json',{'prefix':'existing','device_id':'existing-device'})
+        service=self.studio.get('reader');identity=copy.deepcopy(service.identity)
         restored=Studio(self.tmp.name)
-        entity=restored.discovery.desired()['homeassistant/sensor/existing/status/config']
-        self.assertEqual(entity['unique_id'],'existing_status')
-        self.assertEqual(entity['device']['identifiers'],['existing-device'])
+        self.assertEqual(restored.get('reader').identity,identity)
+        self.assertFalse(any(identity['prefix'] in t for t in restored.discovery.desired()))
+        await restored.close()
 
     async def test_persistence_failure_never_authorizes_publication(self):
         before=copy.deepcopy(self.d.data)
         with patch.object(self.d.store,'write',side_effect=OSError('disk full')):
-            with self.assertRaises(OSError):await self.d.save(self.config)
+            with self.assertRaises(OSError):await self.d.save({**self.config,'prefix':'changed'})
         self.assertEqual(self.d.data,before)
         await self.d.save(self.config)
         original=self.d.store.write
@@ -166,20 +130,15 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
             await self.d.reconcile()
             self.assertTrue(self.d.store.read('discovery.json')['owned'])
 
-    async def test_discovery_route_collisions_and_stale_processing(self):
-        await self.studio.create({'id':'echo','name':'Echo','type':'echo'})
-        service=self.studio.get('echo');prefix=service.identity['prefix']
+    async def test_discovery_route_collisions(self):
+        service=self.studio.get('reader')
         config=copy.deepcopy(service.config['draft'])
         config['input']['broker_id']=self.broker
-        config['output'].update(broker_id=self.broker,topic=prefix+'/status')
-        await service.save(config,True)
-        with self.assertRaises(Invalid):await self.d.save(self.config)
-        await service.deactivate();await self.d.save(self.config)
+        config['output'].update(broker_id=self.broker,topic=self.prefix+'/value_water')
         with self.assertRaises(Invalid):await service.save(config,True)
         with self.assertRaises(Invalid):await self.d.save({**self.config,'ha_status_topic':self.studio.namespace+'/discovery/availability'})
         config['output']['topic']='safe/result';await service.save(config,True)
-        service.last={'execution':'processing','delivery':'not_sent'}
-        self.assertEqual(self.d.desired()[prefix+'/status'],'interrupted')
+        self.assertTrue(service.enabled)
 
     async def test_cleanup_connection_survives_missing_supervisor(self):
         await self.d.save(self.config)
@@ -193,33 +152,38 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.d.data['owned'],[])
         self.assertEqual(self.studio.brokers.cleanup_connections,{})
 
-    async def test_legacy_migration_and_custom_prefix_partial_publish(self):
-        for id in ('first','second'):
-            await self.studio.create({'id':id,'name':id,'type':'echo'})
-            service=self.studio.get(id);config=copy.deepcopy(service.config['draft'])
-            config['input']['broker_id']=self.broker
-            await service.save(config,True)
-        # Simulate upgrade from a pre-manifest version; preserve stored identities.
-        (self.studio.store.root/'discovery.json').unlink()
-        restored=Studio(self.tmp.name);manager=restored.discovery
-        self.assertTrue(manager.public()['legacy_pending'])
+    async def test_legacy_action_and_studio_cleanup_failure_restart(self):
+        legacy=['homeassistant/sensor/old/status/config','old/status',
+                'homeassistant/sensor/root/active_actions/config','root/discovery/active_actions']
+        endpoint=self.d.fingerprint(self.broker)
+        self.studio.brokers.pin_cleanup(self.broker,endpoint)
+        self.d.data['owned']=[{'broker_id':self.broker,'endpoint':endpoint,'topics':legacy.copy()}]
+        self.d.persist()
+        calls=[]
+        def fail_second(topic,payload,**kwargs):
+            calls.append((topic,payload))
+            if len(calls)==2:raise OSError('interrupted cleanup')
         with patch('app.discovery.MQTT') as transport:
-            await manager.reconcile();transport.assert_not_called()
-            await manager.save(self.config)
-            transport.return_value.publish.side_effect=OSError('partial publish')
-            with self.assertRaises(OSError):await manager.reconcile()
-        restarted=Studio(self.tmp.name);manager=restarted.discovery
+            transport.return_value.publish.side_effect=fail_second
+            with self.assertRaises(OSError):await self.d.reconcile()
+        self.assertTrue(all(payload=='' for _,payload in calls))
+        restored=Studio(self.tmp.name)
+        self.assertEqual(restored.discovery.public()['pending_cleanup'],3)
         with patch('app.discovery.MQTT') as transport:
-            await manager.save({**self.config,'prefix':'custom-ha'})
-            await manager.reconcile()
-            configs=[topic for item in manager.data['owned'] for topic in item['topics'] if topic.endswith('/config')]
-            self.assertTrue(configs);self.assertTrue(all(t.startswith('custom-ha/') for t in configs))
-            self.assertEqual(len(set(configs)),5)
+            await restored.discovery.save({**self.config,'prefix':'custom-ha'})
+            await restored.discovery.reconcile()
+            calls=[(c.args[0],c.args[1]) for c in transport.return_value.publish.call_args_list]
+            self.assertTrue(all(payload=='' for _,payload in calls[:3]))
+            self.assertEqual({t for t,p in calls if p==''},set(legacy)-{legacy[0]})
+            configs=[topic for item in restored.discovery.data['owned'] for topic in item['topics'] if topic.endswith('/config')]
+            self.assertEqual(len(configs),4)
+            self.assertTrue(all(t.startswith('custom-ha/') for t in configs))
+        await restored.close()
 
     async def test_saved_retry_route_blocks_discovery_collision(self):
         await self.studio.create({'id':'echo','name':'Echo','type':'echo'})
         service=self.studio.get('echo');config=copy.deepcopy(service.config['draft'])
         config['input']['broker_id']=self.broker
-        config['output'].update(broker_id=self.broker,topic=service.identity['prefix']+'/delivery')
+        config['output'].update(broker_id=self.broker,topic=self.prefix+'/status')
         service.jobs={'old':{'config':config}}
         with self.assertRaises(Invalid):await self.d.save(self.config)

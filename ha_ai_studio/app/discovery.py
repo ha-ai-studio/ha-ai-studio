@@ -87,39 +87,36 @@ class Discovery:
 
     def desired(self):
         config = self.data['config']
-        identity = self.store.read('identity.json')
-        namespace = identity['prefix']
-        availability = namespace+'/discovery/availability'
-        device = {'identifiers': [identity['device_id']], 'name': 'HA AI Studio · '+self.studio.instance_id,
-                  'manufacturer': 'HA AI Studio', 'model': 'Local action service', 'sw_version': VERSION}
+        availability = self.studio.namespace + '/discovery/availability'
         result = {}
-
-        def sensor(prefix, key, name, state_topic, value, dev):
-            result[f"{config['prefix']}/sensor/{prefix}/{key}/config"] = {
-                'name': name, 'unique_id': prefix+'_'+key, 'device': dev,
-                'state_topic': state_topic, 'availability_topic': availability,
-                'entity_category': 'diagnostic'}
-            result[state_topic] = str(value)
-
-        sensor(namespace, 'active_actions', 'Active actions', namespace+'/discovery/active_actions',
-               sum(bool(s.enabled) for s in self.studio.services.values()), device)
-        for service in self.studio.services.values():
-            if not service.supported:
-                continue
-            prefix = service.identity['prefix']
-            action_device = {'identifiers': [service.identity['device_id']],
-                'name': 'HA AI Studio · '+self.studio.instance_id+' · '+service.config['draft']['name'], 'manufacturer': 'HA AI Studio',
-                'model': 'Configured '+service.type+' action', 'sw_version': VERSION, 'via_device': identity['device_id']}
-            if action_device['identifiers'] == device['identifiers']:
-                action_device = device  # Preserve a legacy root device without a self via_device link.
-            last = service.last or {}
-            execution = 'disabled' if not service.enabled else 'running' if service.running else last.get('execution', 'idle')
-            execution = {'processing': 'interrupted'}.get(execution, execution)
-            if execution not in ('disabled', 'idle', 'running', 'success', 'error', 'interrupted'): execution = 'error'
-            delivery = last.get('delivery', 'not_sent')
-            if delivery not in ('not_sent', 'pending', 'published', 'failed', 'unknown'): delivery = 'unknown'
-            sensor(prefix, 'status', 'Action status', prefix+'/status', execution, action_device)
-            sensor(prefix, 'delivery', 'MQTT delivery', prefix+'/delivery', delivery, action_device)
+        for item in self.studio.devices.data['items'].values():
+            active = item['active']
+            if not active or not active['publish']:continue
+            prefix = item['identity']
+            device = {'identifiers': [prefix], 'name': active['name'],
+                      'manufacturer': 'HA AI Studio', 'model': 'Virtual device', 'sw_version': VERSION}
+            def entity(key, label, **extra):
+                topic = prefix + '/' + key
+                result[f"{config['prefix']}/sensor/{prefix}/{key}/config"] = {
+                    'unique_id': prefix + '_' + key, 'name': label, 'device': device,
+                    'state_topic': topic, 'availability_topic': availability, **extra}
+                return topic
+            result[entity('status', 'Device status', entity_category='diagnostic')] = item['status']
+            for sensor in active['sensors']:
+                key = 'value_' + sensor['id']
+                value = item['values'].get(sensor['id'], {})
+                extra = {}
+                if type(value.get('value')) in (int, float):
+                    extra['state_class'] = 'total_increasing' if sensor['cumulative'] else 'measurement'
+                if sensor['device_class']:extra['device_class'] = sensor['device_class']
+                if sensor['unit']:extra['unit_of_measurement'] = sensor['unit']
+                topic = entity(key, sensor['name'], **extra)
+                result[topic] = str(value['value']) if value.get('value') is not None else 'None'
+                result[entity('updated_' + sensor['id'], sensor['name'] + ' last successful reading',
+                    device_class='timestamp', entity_category='diagnostic')] = value.get('timestamp', 'None')
+                result[entity('status_' + sensor['id'], sensor['name'] + ' status', entity_category='diagnostic')] = (
+                    'disabled' if not item['enabled'] else value.get('status', 'waiting'))
+        # This is a shared transport availability topic, not an advertised Studio device.
         result[availability] = 'online'
         return result
 

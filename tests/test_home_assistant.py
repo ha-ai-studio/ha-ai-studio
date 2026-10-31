@@ -20,7 +20,7 @@ PNG=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42m
 class HomeAssistantTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
-        self.calls=[];self.light='off';self.fail_camera=False;self.fail_restore=False
+        self.color_modes=[];self.brightness=None;self.service_data=[];self.calls=[];self.light='off';self.fail_camera=False;self.fail_restore=False
         async def api(request):
             self.assertEqual(request.headers.get('Authorization'),'Bearer private-test-token')
             path=request.match_info['path'];self.calls.append((request.method,path))
@@ -30,12 +30,15 @@ class HomeAssistantTests(unittest.IsolatedAsyncioTestCase):
                 {'entity_id':'camera.offline','state':'unavailable','attributes':{}},
                 {'entity_id':'sensor.secret','state':'sensitive','attributes':{}}])
             if path.startswith('states/'):
-                return web.json_response({'state':self.light if path.endswith('light.meter') else 'idle','attributes':{'access_token':'never-return'}})
+                return web.json_response({'state':self.light if path.endswith('light.meter') else 'idle','attributes':{'access_token':'never-return','brightness':self.brightness,'supported_color_modes':self.color_modes}})
             if path.startswith('camera_proxy/'):
                 if self.fail_camera:return web.Response(status=500,text='private-test-token')
                 return web.Response(body=PNG,content_type='image/png')
             if path.startswith('services/'):
                 if path.endswith('/turn_off') and self.fail_restore:return web.Response(status=500)
+                data=await request.json();self.service_data.append(data)
+                if self.fail_restore and data.get('brightness') not in (None,255):return web.Response(status=500)
+                if 'brightness' in data:self.brightness=data['brightness']
                 self.light='on' if path.endswith('/turn_on') else 'off'
                 return web.json_response([])
             return web.Response(status=404)
@@ -142,9 +145,9 @@ class HomeAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(('GET','camera_proxy/camera.meter'),self.calls)
     async def test_cancel_during_inflight_light_call_restores_after_completion(self):
         original=self.gateway.service;started=asyncio.Event();finish=asyncio.Event()
-        async def delayed(entity,operation):
+        async def delayed(entity,operation,**data):
             if operation=='turn_on':started.set();await finish.wait()
-            await original(entity,operation)
+            await original(entity,operation,**data)
         async def execution():
             async with self.gateway.session(self.settings) as access:
                 await self.call(HomeAssistantClient(access),'light_on','light.meter')
@@ -193,3 +196,55 @@ class HomeAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Waiting 2 seconds before the first capture.',entries)
         self.assertIn('Waiting 5.5 seconds before the next capture.',entries)
         self.assertEqual(self.calls,[])
+
+    async def test_dimmable_light_full_brightness_and_restore(self):
+        for state in ('on','off'):
+            self.light=state;self.brightness=73
+            async with self.gateway.session(self.settings) as access:
+                client=HomeAssistantClient(access)
+                await self.call(client,'light_on','light.meter')
+                self.assertEqual(self.brightness,255)
+                await self.call(client,'light_on','light.meter')
+                self.assertEqual(self.gateway.pending['light.meter']['brightness'],73)
+            self.assertEqual(self.light,state)
+            self.assertEqual(self.brightness,73)
+            self.assertFalse(self.gateway.pending)
+
+    async def test_brightness_restoration_survives_restart(self):
+        self.light='on';self.brightness=255
+        self.gateway.pending={'light.meter':{'connection':self.gateway.fingerprint(),'state':'on','brightness':42}}
+        self.gateway.store.write('restore.json',self.gateway.pending)
+        restored=HomeAssistant(self.root)
+        await restored.restore('light.meter')
+        self.assertEqual(self.light,'on');self.assertEqual(self.brightness,42)
+        self.assertFalse(restored.pending)
+
+    async def test_off_dimmable_without_saved_brightness_uses_full_brightness(self):
+        self.color_modes=['brightness']
+        async with self.gateway.session(self.settings) as access:
+            await self.call(HomeAssistantClient(access),'light_on','light.meter')
+            self.assertEqual(self.service_data[-1],{'entity_id':'light.meter','brightness':255})
+        self.assertEqual(self.light,'off');self.assertFalse(self.gateway.pending)
+
+    async def test_on_dimmable_unknown_brightness_rejected_before_mutation(self):
+        self.light='on';self.color_modes=['brightness']
+        async with self.gateway.session(self.settings) as access:
+            with self.assertRaisesRegex(ValueError,'brightness is unavailable'):
+                await self.call(HomeAssistantClient(access),'light_on','light.meter')
+        self.assertEqual(self.service_data,[]);self.assertFalse(self.gateway.pending)
+
+    async def test_brightness_restore_failure_is_durable_and_blocks_capture(self):
+        self.light='on';self.brightness=73
+        with self.assertRaisesRegex(Invalid,'restoration is pending'):
+            async with self.gateway.session(self.settings) as access:
+                await self.call(HomeAssistantClient(access),'light_on','light.meter')
+                self.fail_restore=True
+        restored=HomeAssistant(self.root)
+        self.assertEqual(restored.pending['light.meter']['brightness'],73)
+        async with restored.session(self.settings) as access:
+            with self.assertRaisesRegex(ValueError,'restoration'):
+                await self.call(HomeAssistantClient(access),'capture','camera.meter')
+        self.fail_restore=False
+        await restored.restore('light.meter')
+        self.assertEqual(self.light,'on');self.assertEqual(self.brightness,73)
+        self.assertFalse(restored.pending)

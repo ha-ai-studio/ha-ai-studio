@@ -1,16 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import { Button, SidePanel } from "./design-system";
+import { DevicesPage, DeviceEditor } from "./features/DevicesPage";
 import { ActionsPage } from "./features/ActionsPage";
 import { ActionEditor } from "./features/ActionEditor";
 import { LivePage } from "./features/LivePage";
 import { SettingsPage } from "./features/SettingsPage";
 type Route =
+  | { page: "devices" }
+  | { page: "device"; id: string }
   | { page: "actions" }
   | { page: "settings" }
   | { page: "editor"; id: string }
   | { page: "live"; id: string };
 function readRoute(): Route {
   const [page, id, child] = location.hash.split("/");
+  if (page === "#devices" && id) {
+    try {
+      return { page: "device", id: decodeURIComponent(id) };
+    } catch {
+      return { page: "devices" };
+    }
+  }
+  if (page === "#actions" && !id) return { page: "actions" };
   if (page === "#settings") return { page: "settings" };
   if (page === "#actions" && id) {
     try {
@@ -22,9 +33,12 @@ function readRoute(): Route {
       /* Invalid links fall back to the table. */
     }
   }
-  return { page: "actions" };
+  return { page: "devices" };
 }
 function hash(route: Route) {
+  if (route.page === "devices") return "#devices";
+  if (route.page === "device")
+    return `#devices/${encodeURIComponent(route.id)}`;
   return route.page === "settings"
     ? "#settings"
     : route.page === "actions"
@@ -74,11 +88,11 @@ export function App() {
       <header className="app-header">
         <a
           className="brand"
-          href="#actions"
-          aria-label="HA AI Studio — Actions"
+          href="#devices"
+          aria-label="HA AI Studio — Devices"
           onClick={(e) => {
             e.preventDefault();
-            navigate({ page: "actions" });
+            navigate({ page: "devices" });
           }}
         >
           <svg className="brand-logo" viewBox="0 0 40 40" aria-hidden="true">
@@ -109,7 +123,20 @@ export function App() {
         <nav aria-label="Main navigation">
           <Button
             disabled={busy}
-            aria-current={route.page !== "settings" ? "page" : undefined}
+            aria-current={
+              ["devices", "device"].includes(route.page) ? "page" : undefined
+            }
+            onClick={() => navigate({ page: "devices" })}
+          >
+            Devices
+          </Button>
+          <Button
+            disabled={busy}
+            aria-current={
+              ["actions", "editor", "live"].includes(route.page)
+                ? "page"
+                : undefined
+            }
             onClick={() => navigate({ page: "actions" })}
           >
             Actions
@@ -124,6 +151,18 @@ export function App() {
         </nav>
       </header>
       <main>
+        {route.page === "devices" && (
+          <DevicesPage open={(id) => navigate({ page: "device", id })} />
+        )}
+        {route.page === "device" && (
+          <DeviceEditor
+            key={route.id}
+            id={route.id}
+            back={() => navigate({ page: "devices" })}
+            onDirty={setDirty}
+            onBusy={setBusy}
+          />
+        )}
         {route.page === "actions" && (
           <ActionsPage
             open={(id) => navigate({ page: "editor", id })}

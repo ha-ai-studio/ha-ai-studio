@@ -91,15 +91,19 @@ class HomeAssistant:
         if state in ('unknown','unavailable'):raise Invalid('Selected Home Assistant entity is unavailable.')
         return {'entity_id':entity,'state':state}
 
-    async def service(self,entity,action):
-        await self.request('POST','services/'+entity.split('.')[0]+'/'+action,{'entity_id':entity})
+    async def service(self,entity,action,**data):
+        await self.request('POST','services/'+entity.split('.')[0]+'/'+action,{'entity_id':entity,**data})
 
     async def restore(self,entity):
         record=self.pending.get(entity)
         if not record:return
         if record['connection']!=self.fingerprint():raise Invalid('Light restoration is pending for a different Home Assistant connection.')
-        # We only turn previously-off entities on; entities already on are untouched.
-        await self.service(entity,'turn_off')
+        # Legacy journal entries represent lights that were originally off.
+        brightness=record.get('brightness')
+        if brightness is not None:
+            await self.service(entity,'turn_on',brightness=brightness)
+        if record.get('state','off')=='off':
+            await self.service(entity,'turn_off')
         candidate=dict(self.pending);candidate.pop(entity,None)
         self.store.write('restore.json',candidate);self.pending=candidate
 
@@ -161,12 +165,18 @@ class HomeAssistant:
                                     path=Path(directory)/f'capture-{captures}.img';path.write_bytes(data);path.chmod(0o600)
                                     result={'path':str(path)}
                                 elif operation=='light_on' and entity.startswith(('light.','switch.')):
-                                    state=await self.state(entity)
-                                    if state['state'] not in ('on','off'):raise Invalid('Illumination entity must have an on/off state.')
-                                    if state['state']=='off':
-                                        candidate={**self.pending,entity:{'connection':self.fingerprint()}}
+                                    state=await self.request('GET','states/'+entity)
+                                    if state.get('state') not in ('on','off'):raise Invalid('Illumination entity must have an on/off state.')
+                                    attrs=state.get('attributes',{})
+                                    brightness=attrs.get('brightness')
+                                    if type(brightness) is not int or not 0<=brightness<=255:brightness=None
+                                    dimmable=entity.startswith('light.') and (brightness is not None or bool(set(attrs.get('supported_color_modes') or [])-{'onoff','unknown'}))
+                                    if state['state']=='on' and dimmable and brightness is None:
+                                        raise Invalid('Cannot safely restore illumination: current brightness is unavailable.')
+                                    if entity not in touched and (state['state']=='off' or dimmable):
+                                        candidate={**self.pending,entity:{'connection':self.fingerprint(),'state':state['state'],'brightness':brightness if dimmable else None}}
                                         self.store.write('restore.json',candidate);self.pending=candidate;touched.add(entity)
-                                        await self.service(entity,'turn_on')
+                                        await self.service(entity,'turn_on',**({'brightness':255} if dimmable else {}))
                                     result={'changed':entity in touched}
                                 elif operation=='restore' and entity in touched:
                                     await self.restore(entity);touched.remove(entity);result={'restored':True}

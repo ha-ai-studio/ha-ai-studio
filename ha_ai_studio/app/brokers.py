@@ -73,7 +73,8 @@ class Brokers:
             edges[start]=end
         if self.discovery:
             for service in self.services():
-                for job in service.jobs.values():self.discovery.check_routes(service.routes(job['config']))
+                for job in service.jobs.values():
+                    if job.get('source') != 'device':self.discovery.check_routes(service.routes(job['config']))
         for start in edges:
             seen=set();node=start
             while node in edges:

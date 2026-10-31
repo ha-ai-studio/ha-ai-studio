@@ -1,0 +1,24 @@
+# Disposable IAB fixtures: synthetic local Actions; MQTT connections are blocked.
+# Does not mount .dev-data, private .env, or live Home Assistant credentials.
+services:
+  studio:
+    build:
+      context: ../ha_ai_studio
+    image: ha-ai-studio:dev
+    platform: linux/amd64
+    command: [python, /tests/ui_device_server.py]
+    environment:
+      HA_AI_STUDIO_DEV: '1'
+      PYTHONPATH: /app
+    ports:
+      - '127.0.0.1:8101:8099'
+    volumes:
+      - ./:/tests:ro
+  ingress:
+    image: ha-ai-studio:dev
+    platform: linux/amd64
+    command: [python, /dev-tools/ingress_proxy.py]
+    ports:
+      - '127.0.0.1:8102:8100'
+    volumes:
+      - ../scripts:/dev-tools:ro

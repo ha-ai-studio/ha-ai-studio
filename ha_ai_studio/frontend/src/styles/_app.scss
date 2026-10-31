@@ -95,3 +95,12 @@
     }
   }
 }
+
+.device-footer {
+  position: sticky;
+  bottom: 0;
+  padding: 16px;
+  background: var(--card);
+  border-top: 1px solid var(--border);
+  z-index: 1;
+}
