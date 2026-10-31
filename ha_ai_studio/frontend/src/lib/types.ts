@@ -146,6 +146,7 @@ export interface DeviceConfig {
   sensors: DeviceSensor[];
 }
 export interface DeviceState {
+  logs?: { time: string; message: string }[];
   id: string;
   identity: string;
   draft: DeviceConfig;

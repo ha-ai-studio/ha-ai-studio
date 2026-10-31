@@ -46,6 +46,31 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.tasks[id]
             return execute
 
+    async def test_live_measurement_log_is_scoped_bounded_and_reset(self):
+        from app.test_progress import current
+        item = await configured_device(self.studio)
+        other = await configured_device(self.studio, name='Other device')
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def execute(data, settings):
+            current.get()('Capturing camera image.')
+            entered.set()
+            await release.wait()
+            return {'readings': [reading()]}
+        with patch.object(self.action, 'execute', execute):
+            self.manager.start_read(item['id'])
+            await entered.wait()
+            logs = self.manager.public(item['id'])['logs']
+            self.assertEqual(logs[-1]['message'], 'Capturing camera image.')
+            self.assertEqual(self.manager.public(other['id'])['logs'], [])
+            release.set()
+            await self.manager.tasks[item['id']]
+        self.assertEqual(self.manager.public(item['id'])['logs'][-1]['message'], 'Measurement finished: ready.')
+        self.assertIsNone(current.get())
+        for _ in range(250):self.manager.log(item['id'], 'Old entry.')
+        self.assertEqual(len(self.manager.public(item['id'])['logs']), 200)
+        await self.run_device(item['id'], [reading()])
+        self.assertNotIn('Old entry.', [e['message'] for e in self.manager.public(item['id'])['logs']])
+
     async def test_internal_execution_once_for_multiple_sensors_no_mqtt(self):
         item = await configured_device(self.studio, [sensor(), sensor('temperature', kind='temperature', unit='°C')])
         with patch('app.actions.MQTT') as transport:

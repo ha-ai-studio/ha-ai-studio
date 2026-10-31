@@ -48,6 +48,7 @@ class Devices:
         self.data = self.store.read('devices.json', {'items': {}, 'deleted': []})
         migrate_sensor_profiles(self.data)
         self.tasks = {}
+        self.logs = {}
         self.editing = set()
         self.task = None
         self.stopping = False
@@ -73,10 +74,16 @@ class Devices:
     def public(self, id):
         item = self.get(id)
         result = {k: copy.deepcopy(item[k]) for k in ('id', 'identity', 'draft', 'active', 'enabled', 'values', 'status', 'last_attempt', 'next_run')}
+        result['logs'] = copy.deepcopy(self.logs.get(id, []))
         result['busy'] = self.busy(id)
         result['issue'] = self.error
         result['publication'] = self.studio.discovery.status if item['active'] and item['active']['publish'] else 'Not published'
         return result
+
+    def log(self, id, message):
+        entries = self.logs.setdefault(id, [])
+        entries.append({'time': timestamp(), 'message': message})
+        del entries[:-200]
 
     def list(self):
         return {'devices': [self.public(id) for id in self.data['items']]}
@@ -221,6 +228,8 @@ class Devices:
         candidate['items'][id].update(status='running', last_attempt=timestamp(),
             next_run=time.time() + item['active']['interval_minutes'] * 60)
         self.commit(candidate)  # Durable intent before any action, including restart interruption.
+        self.logs[id] = []
+        self.log(id, 'Measurement started.')
         self.tasks[id] = asyncio.create_task(self.measure(id))
         return self.public(id)
 
@@ -229,10 +238,13 @@ class Devices:
         config = item['active']
         values = copy.deepcopy(item['values'])
         successes = 0
+        from .test_progress import current
+        token = current.set(lambda message: self.log(id, message))
         try:
             for action_id, binding in item['bindings'].items():
                 sensors = [s for s in config['sensors'] if s['action_id'] == action_id]
                 try:
+                    self.log(id, 'Waiting for action ' + action_id + '.')
                     action = self.studio.get(action_id)
                     if action.environment and action.plugin.record != binding['plugin']:
                         raise Invalid('Action source changed. Reactivate the device.')
@@ -244,6 +256,7 @@ class Devices:
                             for s in sensors if s['id'] in values and type(values[s['id']].get('value')) in (int, float)}
                     result = await action.internal_request('device-' + uuid.uuid4().hex, data, binding['config'])
                     if result.get('status') != 'success':raise Invalid('Action execution failed.')
+                    self.log(id, 'Action finished. Validating sensor readings.')
                     output = result['data']
                     readings = output.get('readings') if isinstance(output, dict) else None
                     if not isinstance(readings, list):raise Invalid('Action must return a readings array.')
@@ -273,9 +286,12 @@ class Devices:
                             now = time.time()
                             values[sensor['id']] = {'value': value, 'measured_at': now, 'timestamp': timestamp(now), 'status': 'ready', 'error': None}
                             successes += 1
+                            self.log(id, sensor['id'] + ': Reading accepted.')
                         except Invalid as exc:
                             values.setdefault(sensor['id'], {}).update(status='error', error=str(exc))
+                            self.log(id, sensor['id'] + ': ' + str(exc))
                 except Exception:
+                    self.log(id, 'Action failed or returned an unsupported reading. Check its configuration.')
                     for sensor in sensors:values.setdefault(sensor['id'], {}).update(status='error', error='Action failed or returned an unsupported reading. Check its configuration.')
                 # Preserve completed independent measurements if a later action is interrupted.
                 candidate = copy.deepcopy(self.data)
@@ -285,10 +301,15 @@ class Devices:
             candidate['items'][id].update(status='ready' if successes == len(config['sensors']) else 'partial' if successes else 'error',
                 next_run=time.time() + config['interval_minutes'] * 60)
             self.commit(candidate)
+            self.log(id, 'Measurement finished: ' + self.get(id)['status'] + '.')
         except asyncio.CancelledError:
+            self.log(id, 'Measurement interrupted; it will not be replayed.')
             raise  # Persisted running intent is recovered as interrupted, never replayed.
         except Exception:
             self.error = 'Device persistence failed. Automatic measurements are paused; restart after resolving storage.'
+            self.log(id, self.error)
+        finally:
+            current.reset(token)
 
     async def run(self):
         while not self.stopping:

@@ -185,11 +185,13 @@ export function Status({
   name,
   status,
   detail,
+  children,
   tone = "pending",
 }: {
   name: string;
   status: string;
   detail?: string;
+  children?: ReactNode;
   tone?: "pending" | "success" | "error";
 }) {
   return (
@@ -200,6 +202,7 @@ export function Status({
         <p role="status">{status}</p>
         {detail && <p className="small muted">{detail}</p>}
       </div>
+      {children}
     </div>
   );
 }

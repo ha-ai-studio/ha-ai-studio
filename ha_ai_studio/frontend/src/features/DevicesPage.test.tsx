@@ -58,6 +58,12 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
         }
         result = devices[0];
       } else if (endpoint === "device-read") {
+        devices[0].logs = [
+          {
+            time: "2026-10-31T12:00:00Z",
+            message: "Measurement finished: ready.",
+          },
+        ];
         devices[0].values = {
           "measurement-1": {
             value: 123,
@@ -90,7 +96,7 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
     within(dialog).getByRole("button", { name: "Create device" }),
   );
   await userEvent.click(
-    await screen.findByRole("button", { name: "Add measurement" }),
+    await screen.findByRole("button", { name: "Add sensor" }),
   );
   await userEvent.selectOptions(
     screen.getByLabelText("Action", { exact: true }),
@@ -100,9 +106,7 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
     screen.getByLabelText("Action reading", { exact: true }),
     "main",
   );
-  await userEvent.click(
-    screen.getByRole("button", { name: "Add measurement" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Add sensor" }));
   await userEvent.selectOptions(
     screen.getAllByLabelText("Action", { exact: true })[1],
     "action-1",
@@ -133,7 +137,10 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
     expect(screen.getByRole("button", { name: "Read now" })).toBeEnabled(),
   );
   await userEvent.click(screen.getByRole("button", { name: "Read now" }));
-  await screen.findByText(/Last valid reading: 123/);
+  await screen.findByText("123 m³");
+  expect(screen.getByLabelText("Measurement log")).toHaveTextContent(
+    "Measurement finished: ready.",
+  );
   await userEvent.type(screen.getByLabelText("Device name"), " draft");
   await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
   await screen.findByText("Draft saved. Active measurements are unchanged.");
@@ -186,4 +193,102 @@ it("displays text readings without losing leading zeros", async () => {
   expect(
     await screen.findByText("Serial Number: 000123-AB"),
   ).toBeInTheDocument();
+});
+
+it("keeps errors visible on collapsed sensors and reveals invalid advanced fields before saving", async () => {
+  const { DeviceEditor } = await import("./DevicesPage");
+  const draft = {
+    name: "Fixture",
+    interval_minutes: 30,
+    publish: false,
+    sensors: [
+      {
+        id: "serial",
+        name: "Serial number",
+        unit: "",
+        action_id: "reader",
+        reading: "serial",
+        device_class: "",
+        cumulative: false,
+        max_change: null,
+      },
+    ],
+  };
+  const mutations: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (target: URL, options: RequestInit) => {
+      if (options.method === "POST") mutations.push(String(target));
+      return {
+        ok: true,
+        json: async () =>
+          new URL(target).pathname.endsWith("/actions")
+            ? {
+                actions: [
+                  {
+                    definition: { id: "reader", name: "Reader" },
+                    supported: true,
+                    enabled: false,
+                  },
+                ],
+              }
+            : {
+                id: "fixture",
+                draft,
+                active: draft,
+                enabled: true,
+                busy: false,
+                status: "error",
+                publication: "Not published",
+                values: {
+                  serial: {
+                    value: "000123",
+                    timestamp: "2026-10-31T12:00:00Z",
+                    error: "Reading failed.",
+                  },
+                },
+              },
+      };
+    }),
+  );
+  render(
+    <DeviceEditor
+      id="fixture"
+      back={() => {}}
+      onDirty={() => {}}
+      onBusy={() => {}}
+    />,
+  );
+  expect(await screen.findByText("Reading failed.")).toBeVisible();
+  expect(screen.getByText("000123")).toBeVisible();
+  const name = screen.getByLabelText("Sensor name");
+  const outer = name.closest("details")!;
+  expect(outer.open).toBe(false);
+  await userEvent.click(outer.querySelector("summary")!);
+  await userEvent.click(screen.getByText("Advanced settings"));
+  const sensorId = screen.getByLabelText(/^Sensor ID/);
+  const advanced = sensorId.closest("details")!;
+  await userEvent.clear(sensorId);
+  await userEvent.type(sensorId, "INVALID");
+  await userEvent.click(advanced.querySelector("summary")!);
+  await userEvent.click(outer.querySelector("summary")!);
+  await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
+  await waitFor(() => expect(outer.open).toBe(true));
+  expect(advanced.open).toBe(true);
+  expect(sensorId).toBeVisible();
+  expect(mutations).toEqual([]);
+  await userEvent.clear(sensorId);
+  await userEvent.type(sensorId, "serial");
+  const deviceClass = screen.getByLabelText(/^Home Assistant device class/);
+  await userEvent.type(deviceClass, "Invalid Class");
+  await userEvent.click(advanced.querySelector("summary")!);
+  await userEvent.click(outer.querySelector("summary")!);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Activate device" }),
+  );
+  await waitFor(() => expect(outer.open).toBe(true));
+  expect(advanced.open).toBe(true);
+  expect(deviceClass).toBeVisible();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mutations).toEqual([]);
 });

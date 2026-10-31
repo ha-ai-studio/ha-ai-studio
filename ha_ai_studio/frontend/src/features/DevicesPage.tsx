@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Button,
   Card,
   Checkbox,
   DataTable,
   Input,
+  LogView,
   Notice,
   Select,
   SidePanel,
@@ -211,17 +212,21 @@ export function DeviceEditor({
       });
     return () => c.abort();
   }, [id]);
-  usePoll(async (signal) => {
-    try {
-      const device = await api("device", undefined, id, signal);
-      if (!signal.aborted) {
-        setItem(device);
-        setError("");
+  usePoll(
+    async (signal) => {
+      try {
+        const device = await api("device", undefined, id, signal);
+        if (!signal.aborted) {
+          setItem(device);
+          setError("");
+        }
+      } catch (e) {
+        if (!signal.aborted) setError(errorText(e));
       }
-    } catch (e) {
-      if (!signal.aborted) setError(errorText(e));
-    }
-  }, !op.busy && !confirm);
+    },
+    !op.busy && !confirm,
+    item?.busy ? 500 : 2000,
+  );
   if (!item || !config)
     return (
       <>
@@ -255,7 +260,7 @@ export function DeviceEditor({
       setConfirm(false);
     });
   return (
-    <section>
+    <section className="device-editor">
       <div className="heading">
         <div>
           <Button onClick={back} disabled={op.busy}>
@@ -263,8 +268,7 @@ export function DeviceEditor({
           </Button>
           <h1>{config.name}</h1>
           <p>
-            Each sensor uses a named number or text reading from its assigned
-            action.
+            Manage sensors, automatic readings and Home Assistant publication.
           </p>
         </div>
         <div className="actions">
@@ -309,53 +313,121 @@ export function DeviceEditor({
                 : "pending"
           }
           detail={item.publication}
-        />
-        <p>Last attempt: {date(item.last_attempt)}</p>
-        <p>
-          Next update:{" "}
-          {item.next_run
-            ? new Date(item.next_run * 1000).toLocaleString()
-            : "Not scheduled"}
-        </p>
+        >
+          <div className="device-timing small muted">
+            <span>Last attempt: {date(item.last_attempt)}</span>
+            <span>
+              Next update:{" "}
+              {item.next_run
+                ? new Date(item.next_run * 1000).toLocaleString()
+                : "Not scheduled"}
+            </span>
+          </div>
+        </Status>
+        <div className="device-measurement-log">
+          <h3>Measurement log</h3>
+          <LogView label="Measurement log" live>
+            {item.logs?.length
+              ? item.logs
+                  .map(
+                    (entry) =>
+                      `${new Date(entry.time).toLocaleTimeString()}  ${entry.message}`,
+                  )
+                  .join("\n")
+              : "No measurement log yet. Select Read now to follow the next measurement. Logs are cleared when Studio restarts."}
+          </LogView>
+        </div>
       </Card>
       <form
         id="device-form"
+        onInvalidCapture={(event) => {
+          let parent = (event.target as HTMLElement).parentElement;
+          while (parent && parent !== event.currentTarget) {
+            if (parent instanceof HTMLDetailsElement) parent.open = true;
+            parent = parent.parentElement;
+          }
+        }}
         onSubmit={(e) => {
           e.preventDefault();
           void save(false);
         }}
       >
         <fieldset disabled={locked}>
-          <Card title="Configuration">
-            <Input
-              label="Device name"
-              value={config.name}
-              required
-              maxLength={80}
-              onChange={(e) => change({ name: e.target.value })}
-            />
-            <Input
-              label="Update interval (minutes)"
-              type="number"
-              min={1}
-              max={10080}
-              step={1}
-              required
-              value={config.interval_minutes}
-              onChange={(e) =>
-                change({ interval_minutes: Number(e.target.value) })
-              }
-            />
+          <Card title="Device settings">
+            <div className="device-field-grid">
+              <Input
+                label="Device name"
+                value={config.name}
+                required
+                maxLength={80}
+                onChange={(e) => change({ name: e.target.value })}
+              />
+              <Input
+                label="Update interval (minutes)"
+                type="number"
+                min={1}
+                max={10080}
+                step={1}
+                required
+                value={config.interval_minutes}
+                onChange={(e) =>
+                  change({ interval_minutes: Number(e.target.value) })
+                }
+              />
+            </div>
             <Checkbox
               label="Publish this device to Home Assistant"
               checked={config.publish}
               onChange={(e) => change({ publish: e.target.checked })}
             />
             <p className="muted">
-              Uses central MQTT Discovery from Settings. Actions are never
-              advertised as devices.
+              Publishes these sensors using MQTT Discovery configured in
+              Settings.
             </p>
           </Card>
+          <div className="heading sensor-section-heading">
+            <div>
+              <h2>
+                Sensors <span className="muted">({config.sensors.length})</span>
+              </h2>
+              <p>
+                Each sensor displays a number or text supplied by an Action.
+              </p>
+            </div>
+            <Button
+              className="sensor-add-button"
+              aria-label="Add sensor"
+              title="Add sensor"
+              disabled={config.sensors.length >= 16}
+              onClick={() =>
+                change({
+                  sensors: [
+                    ...config.sensors,
+                    {
+                      id: Array.from(
+                        { length: 17 },
+                        (_, i) => `measurement-${i + 1}`,
+                      ).find((id) => !config.sensors.some((s) => s.id === id))!,
+                      name: "Sensor",
+                      device_class: "",
+                      cumulative: false,
+                      unit: "",
+                      action_id: "",
+                      reading: "",
+                      max_change: null,
+                    },
+                  ],
+                })
+              }
+            >
+              <span aria-hidden="true">+</span>
+            </Button>
+          </div>
+          {!config.sensors.length && (
+            <p className="sensor-empty">
+              Add a sensor to choose what this device reads.
+            </p>
+          )}
           {config.sensors.map((sensor, index) => {
             const selected = actions.find(
               (a) => a.definition.id === sensor.action_id,
@@ -378,10 +450,139 @@ export function DeviceEditor({
               item.active?.sensors.find((s) => s.id === sensor.id)?.unit ||
               sensor.unit;
             return (
-              <Card
+              <SensorCard
                 key={index}
-                title={`Measurement ${index + 1}`}
-                actions={
+                name={sensor.name || `Sensor ${index + 1}`}
+                reading={
+                  value?.value === undefined
+                    ? "No reading yet"
+                    : `${value.value} ${activeUnit}`.trim()
+                }
+                source={selected?.definition.name || "Choose an Action"}
+                error={value?.error}
+                initiallyOpen={!sensor.action_id || !sensor.reading}
+              >
+                <div className="device-field-grid">
+                  <Input
+                    label="Sensor name"
+                    required
+                    value={sensor.name}
+                    maxLength={80}
+                    onChange={(e) =>
+                      sensorChange(index, { name: e.target.value })
+                    }
+                  />
+                  <Input
+                    label="Unit"
+                    hint="Leave empty for text values such as serial numbers."
+                    value={sensor.unit}
+                    onChange={(e) =>
+                      sensorChange(index, { unit: e.target.value })
+                    }
+                  />
+                </div>
+                <div className="device-field-grid">
+                  <Select
+                    label="Action"
+                    required
+                    value={sensor.action_id}
+                    onChange={(e) =>
+                      sensorChange(index, {
+                        action_id: e.target.value,
+                        reading: "",
+                      })
+                    }
+                  >
+                    <option value="">Select an action</option>
+                    {actions.map((a) => (
+                      <option key={a.definition.id} value={a.definition.id}>
+                        {a.definition.name}
+                      </option>
+                    ))}
+                  </Select>
+                  {meters.length ? (
+                    <Select
+                      label="Action reading"
+                      required
+                      value={sensor.reading}
+                      onChange={(e) =>
+                        sensorChange(index, { reading: e.target.value })
+                      }
+                    >
+                      <option value="">Select a reading</option>
+                      {meters.map((m) => (
+                        <option value={m.id} key={m.id}>
+                          {m.name || m.id}
+                        </option>
+                      ))}
+                    </Select>
+                  ) : (
+                    <Input
+                      label="Action reading ID"
+                      required
+                      pattern={"[a-z][a-z0-9\\-]{0,47}"}
+                      value={sensor.reading}
+                      hint="The named reading supplied by this action."
+                      onChange={(e) =>
+                        sensorChange(index, { reading: e.target.value })
+                      }
+                    />
+                  )}
+                </div>
+                <details className="sensor-advanced">
+                  <summary>Advanced settings</summary>
+                  <p className="small muted">
+                    Stable identity, Home Assistant classification and numeric
+                    validation.
+                  </p>
+                  <div className="device-field-grid">
+                    <Input
+                      label="Sensor ID"
+                      required
+                      pattern={"[a-z][a-z0-9\\-]{0,47}"}
+                      value={sensor.id}
+                      hint="Stable identity for Home Assistant history. Use a new ID when replacing a meter."
+                      onChange={(e) =>
+                        sensorChange(index, { id: e.target.value })
+                      }
+                    />
+                    <Input
+                      label="Home Assistant device class"
+                      value={sensor.device_class}
+                      maxLength={64}
+                      pattern="[a-z][a-z0-9_]{0,63}"
+                      hint="Optional HA classification, such as water. Studio does not interpret it. Leave empty for a generic sensor."
+                      onChange={(e) =>
+                        sensorChange(index, { device_class: e.target.value })
+                      }
+                    />
+                  </div>
+                  <Checkbox
+                    label="Cumulative counter (value must not decrease)"
+                    checked={sensor.cumulative}
+                    onChange={(e) =>
+                      sensorChange(index, { cumulative: e.target.checked })
+                    }
+                  />
+                  <Input
+                    label="Maximum change per reading"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={sensor.max_change ?? ""}
+                    hint="Optional, in the sensor’s unit. Reject larger changes while keeping the last valid value."
+                    onChange={(e) =>
+                      sensorChange(index, {
+                        max_change:
+                          e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                  />
+                </details>
+                <div className="sensor-card-footer">
+                  <span className="small muted">
+                    Last valid reading: {date(value?.timestamp)}
+                  </span>
                   <Button
                     variant="danger"
                     onClick={() =>
@@ -390,148 +591,12 @@ export function DeviceEditor({
                       })
                     }
                   >
-                    Remove measurement
+                    Remove sensor
                   </Button>
-                }
-              >
-                <Input
-                  label="Sensor name"
-                  required
-                  value={sensor.name}
-                  maxLength={80}
-                  onChange={(e) =>
-                    sensorChange(index, { name: e.target.value })
-                  }
-                />
-                <Input
-                  label="Sensor ID"
-                  required
-                  pattern="[a-z][a-z0-9-]{0,47}"
-                  value={sensor.id}
-                  hint="Stable identity for Home Assistant history. Use a new ID when replacing a meter."
-                  onChange={(e) => sensorChange(index, { id: e.target.value })}
-                />
-                <Input
-                  label="Unit"
-                  hint="Leave empty for text values such as serial numbers."
-                  value={sensor.unit}
-                  onChange={(e) =>
-                    sensorChange(index, { unit: e.target.value })
-                  }
-                />
-                <Checkbox
-                  label="Cumulative counter (value must not decrease)"
-                  checked={sensor.cumulative}
-                  onChange={(e) =>
-                    sensorChange(index, { cumulative: e.target.checked })
-                  }
-                />
-                <details>
-                  <summary>Optional Home Assistant metadata</summary>
-                  <Input
-                    label="Home Assistant device class"
-                    value={sensor.device_class}
-                    maxLength={64}
-                    pattern="[a-z][a-z0-9_]{0,63}"
-                    hint="Optional HA classification, such as water. Studio does not interpret it. Leave empty for a generic sensor."
-                    onChange={(e) =>
-                      sensorChange(index, { device_class: e.target.value })
-                    }
-                  />
-                </details>
-                <Select
-                  label="Action"
-                  required
-                  value={sensor.action_id}
-                  onChange={(e) =>
-                    sensorChange(index, {
-                      action_id: e.target.value,
-                      reading: "",
-                    })
-                  }
-                >
-                  <option value="">Select an action</option>
-                  {actions.map((a) => (
-                    <option key={a.definition.id} value={a.definition.id}>
-                      {a.definition.name}
-                    </option>
-                  ))}
-                </Select>
-                {meters.length ? (
-                  <Select
-                    label="Action reading"
-                    required
-                    value={sensor.reading}
-                    onChange={(e) =>
-                      sensorChange(index, { reading: e.target.value })
-                    }
-                  >
-                    <option value="">Select a reading</option>
-                    {meters.map((m) => (
-                      <option value={m.id} key={m.id}>
-                        {m.name || m.id}
-                      </option>
-                    ))}
-                  </Select>
-                ) : (
-                  <Input
-                    label="Action reading ID"
-                    required
-                    pattern="[a-z][a-z0-9-]{0,47}"
-                    value={sensor.reading}
-                    hint="The named reading supplied by this action."
-                    onChange={(e) =>
-                      sensorChange(index, { reading: e.target.value })
-                    }
-                  />
-                )}
-                <Input
-                  label="Maximum change per reading"
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={sensor.max_change ?? ""}
-                  hint="Optional, in the sensor’s unit. Reject larger changes while keeping the last valid value."
-                  onChange={(e) =>
-                    sensorChange(index, {
-                      max_change:
-                        e.target.value === "" ? null : Number(e.target.value),
-                    })
-                  }
-                />
-                <p>
-                  Last valid reading: {value?.value ?? "—"} {activeUnit} ·{" "}
-                  {date(value?.timestamp)}
-                </p>
-                <Notice error>{value?.error}</Notice>
-              </Card>
+                </div>
+              </SensorCard>
             );
           })}
-          <Button
-            disabled={config.sensors.length >= 16}
-            onClick={() =>
-              change({
-                sensors: [
-                  ...config.sensors,
-                  {
-                    id: Array.from(
-                      { length: 17 },
-                      (_, i) => `measurement-${i + 1}`,
-                    ).find((id) => !config.sensors.some((s) => s.id === id))!,
-                    name: "Measurement",
-                    device_class: "",
-                    cumulative: false,
-                    unit: "",
-                    action_id: "",
-                    reading: "",
-                    max_change: null,
-                  },
-                ],
-              })
-            }
-          >
-            Add measurement
-          </Button>
         </fieldset>
         <div className="actions device-footer">
           <Button type="submit" disabled={locked}>
@@ -585,5 +650,41 @@ export function DeviceEditor({
         </SidePanel>
       )}
     </section>
+  );
+}
+
+function SensorCard({
+  name,
+  reading,
+  source,
+  error,
+  initiallyOpen,
+  children,
+}: {
+  name: string;
+  reading: string;
+  source: string;
+  error?: string;
+  initiallyOpen: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
+  return (
+    <article className="sensor-card">
+      <details
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <span className="sensor-card-name">
+            {name}
+            <small>{source}</small>
+          </span>
+          <span className="sensor-card-value">{reading}</span>
+        </summary>
+        <div className="sensor-card-body">{children}</div>
+      </details>
+      <Notice error>{error}</Notice>
+    </article>
   );
 }
