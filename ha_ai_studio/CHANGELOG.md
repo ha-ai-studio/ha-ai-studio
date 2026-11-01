@@ -1,3 +1,10 @@
+## 0.0.18
+
+- Export saved Device configurations as versioned JSON templates, including sensors, derived rates, functions and measurement intervals.
+- Import templates with explicit assignments to existing Actions and a configurable Device name.
+- Create imported Devices with new identities, inactive and unpublished; exclude Home Assistant identities, Action settings, credentials and measurement history.
+- Use compact icon buttons with descriptive tooltips for editing, exporting and deleting Devices.
+
 ## 0.0.17
 
 - Show preparation progress while an Action's Python environment is being installed or verified; open configuration automatically once it is ready.
