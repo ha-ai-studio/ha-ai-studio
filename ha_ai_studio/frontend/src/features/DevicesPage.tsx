@@ -17,6 +17,7 @@ import type {
   ActionState,
   DeviceConfig,
   DeviceSensor,
+  DeviceFunction,
   DeviceState,
 } from "../lib/types";
 import { ConfirmDelete } from "./ActionPanels";
@@ -56,7 +57,7 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
           <h1>Devices</h1>
           <p>
             Virtual devices with scheduled measurements and Home Assistant
-            sensors.
+            sensors and functions.
           </p>
         </div>
         <Button variant="primary" onClick={() => setCreate(true)}>
@@ -248,6 +249,16 @@ export function DeviceEditor({
     setConfig({ ...config, ...patch });
     setMessage("");
   };
+  const functions = config.functions || [];
+  const functionActions = actions.filter((a) =>
+    a.plugin?.functions?.includes("execute"),
+  );
+  const functionChange = (index: number, patch: Partial<DeviceFunction>) =>
+    change({
+      functions: functions.map((f, i) =>
+        i === index ? { ...f, ...patch } : f,
+      ),
+    });
   const sensorChange = (index: number, patch: Partial<DeviceSensor>) =>
     change({
       sensors: config.sensors.map((s, i) =>
@@ -262,7 +273,9 @@ export function DeviceEditor({
       setEnabled(result.enabled);
       setMessage(
         result.enabled
-          ? "Settings saved. Device is active; the next measurement is scheduled."
+          ? result.active?.sensors.length
+            ? "Settings saved. Device is active; the next measurement is scheduled."
+            : "Settings saved. Device is active; functions are available on demand."
           : "Settings saved. Device is inactive.",
       );
     });
@@ -275,12 +288,19 @@ export function DeviceEditor({
         <div>
           <h1>{config.name}</h1>
           <p>
-            Manage sensors, automatic readings and Home Assistant publication.
+            Manage sensors, functions, automatic readings and Home Assistant
+            publication.
           </p>
         </div>
         <div className="actions">
           <Button
-            disabled={locked || !item.enabled || dirty || pendingActivation}
+            disabled={
+              locked ||
+              !item.enabled ||
+              dirty ||
+              pendingActivation ||
+              !item.active?.sensors.length
+            }
             onClick={() =>
               void op.run(async () => {
                 setItem(await api("device-read", {}, id));
@@ -360,7 +380,8 @@ export function DeviceEditor({
               }}
             />
             <p className="small muted">
-              Enable automatic readings. Changes take effect when you save.
+              Enable scheduled readings and configured functions. Changes take
+              effect when you save.
             </p>
             <div className="device-field-grid">
               <Input
@@ -389,8 +410,8 @@ export function DeviceEditor({
               onChange={(e) => change({ publish: e.target.checked })}
             />
             <p className="muted">
-              Publishes these sensors using MQTT Discovery configured in
-              Settings.
+              Publishes all sensors and function buttons using MQTT Discovery
+              configured in Settings.
             </p>
           </Card>
           <div className="heading sensor-section-heading">
@@ -605,15 +626,150 @@ export function DeviceEditor({
               </SensorCard>
             );
           })}
+          <div className="heading sensor-section-heading">
+            <div>
+              <h2>
+                Functions <span className="muted">({functions.length})</span>
+              </h2>
+              <p>
+                Add calls to individual Actions. Execute updates this device’s
+                sensors backed by the selected Action.
+              </p>
+            </div>
+            <Button
+              disabled={functions.length >= 16}
+              onClick={() =>
+                change({
+                  functions: [
+                    ...functions,
+                    {
+                      id: Array.from(
+                        { length: 17 },
+                        (_, i) => `function-${i + 1}`,
+                      ).find((id) => !functions.some((f) => f.id === id))!,
+                      name: "Execute",
+                      action_id: "",
+                      function: "execute",
+                    },
+                  ],
+                })
+              }
+            >
+              Add function
+            </Button>
+          </div>
+          {!functions.length && (
+            <p className="muted">
+              No functions configured. Add only the calls you want this device
+              to offer.
+            </p>
+          )}
+          {functions.map((fn, index) => (
+            <SensorCard
+              key={index}
+              name={fn.name || `Function ${index + 1}`}
+              reading="Execute"
+              source={
+                actions.find((a) => a.definition.id === fn.action_id)
+                  ?.definition.name || "Choose an Action"
+              }
+              initiallyOpen={!fn.action_id}
+            >
+              <div className="device-field-grid">
+                <Input
+                  label="Function name"
+                  required
+                  maxLength={80}
+                  value={fn.name}
+                  onChange={(e) =>
+                    functionChange(index, { name: e.target.value })
+                  }
+                />
+                <Select
+                  label="Function action"
+                  required
+                  value={fn.action_id}
+                  onChange={(e) =>
+                    functionChange(index, { action_id: e.target.value })
+                  }
+                >
+                  <option value="">Select an action</option>
+                  {functionActions.map((a) => (
+                    <option key={a.definition.id} value={a.definition.id}>
+                      {a.definition.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <details className="sensor-advanced">
+                <summary>Advanced settings</summary>
+                <Input
+                  label="Function ID"
+                  required
+                  pattern={"[a-z][a-z0-9\\-]{0,47}"}
+                  value={fn.id}
+                  hint="Stable identity for the Home Assistant button."
+                  onChange={(e) =>
+                    functionChange(index, { id: e.target.value })
+                  }
+                />
+              </details>
+              {!functionActions.length && (
+                <Notice>
+                  No Actions support Execute yet. Add a compatible Action.
+                </Notice>
+              )}
+              <div className="sensor-card-footer">
+                <Button
+                  disabled={
+                    locked || !item.enabled || dirty || pendingActivation
+                  }
+                  onClick={() =>
+                    void op.run(async () => {
+                      setItem(
+                        await api(
+                          "device-function",
+                          {
+                            function_id: fn.id,
+                            request_id: Array.from(
+                              crypto.getRandomValues(new Uint32Array(4)),
+                              (n) => n.toString(16).padStart(8, "0"),
+                            ).join(""),
+                          },
+                          id,
+                        ),
+                      );
+                    })
+                  }
+                >
+                  Run function
+                </Button>
+                <Button
+                  variant="danger"
+                  onClick={() =>
+                    change({
+                      functions: functions.filter((_, i) => i !== index),
+                    })
+                  }
+                >
+                  Remove function
+                </Button>
+              </div>
+            </SensorCard>
+          ))}
         </fieldset>
-        {enabled && !config.sensors.length && (
-          <Notice>Add at least one sensor to enable this device.</Notice>
+        {enabled && !config.sensors.length && !functions.length && (
+          <Notice>
+            Add at least one sensor or function to enable this device.
+          </Notice>
         )}
         <div className="actions device-footer">
           <Button
             type="submit"
             variant="primary"
-            disabled={locked || (enabled && !config.sensors.length)}
+            disabled={
+              locked || (enabled && !config.sensors.length && !functions.length)
+            }
           >
             Save
           </Button>

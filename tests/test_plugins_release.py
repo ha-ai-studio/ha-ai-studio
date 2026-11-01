@@ -213,3 +213,29 @@ class VersionManagement(Releases):
             self.assertEqual(result['environment']['status'],'Failed')
         self.assertFalse(service.environment.ready)
         with self.assertRaises(Invalid):await service.execute(None,{})
+
+    async def test_function_only_device_guards_versions_and_rebinds_on_activation(self):
+        repos=await self.seed();kind=next(iter(repos.types()))
+        await self.studio.create({'id':'sample','name':'Sample','type':kind})
+        service=self.studio.get('sample');await service.environment.task
+        original=service.plugin.record['snapshot']
+        device=self.studio.devices.create({'name':'Function device'})
+        config={**device['draft'],'functions':[{'id':'execute','name':'Execute sample','action_id':'sample','function':'execute'}]}
+        await self.studio.devices.save(device['id'],{'config':config,'enabled':True})
+        self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
+        target=repos.state['repositories'][0]['actions'][0]['snapshot']
+        with self.assertRaisesRegex(Invalid,'Deactivate devices'):
+            await self.studio.change_version('sample',{'snapshot':target})
+        preview=await self.studio.repository_actions({'id':self.ident})
+        self.assertIn('Deactivate devices',preview['actions'][0]['reason'])
+        self.assertEqual(service.plugin.record['snapshot'],original)
+        self.studio.devices.deactivate(device['id'])
+        await self.studio.change_version('sample',{'snapshot':target});await service.environment.task
+        self.assertEqual(self.studio.devices.get(device['id'])['bindings']['sample']['plugin']['snapshot'],original)
+        await self.studio.devices.save(device['id'],{'config':config,'enabled':True})
+        self.assertEqual(self.studio.devices.get(device['id'])['identity'],device['identity'])
+        self.assertEqual(self.studio.devices.get(device['id'])['bindings']['sample']['plugin']['snapshot'],target)
+        self.studio.devices.invoke_function(device['id'],{'function_id':'execute','request_id':'after-upgrade'})
+        await self.studio.devices.tasks[device['id']]
+        self.assertEqual(self.studio.devices.get(device['id'])['status'],'ready')
+        self.assertEqual(list(service.jobs.values())[-1]['result']['data'],'2')

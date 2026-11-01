@@ -46,7 +46,8 @@ def credentials(settings):
 
 
 class MQTT:
-    def __init__(self, identity, trigger, subscribe=True, report=None):
+    def __init__(self, identity, trigger, subscribe=True, report=None, commands=None):
+        self.commands = commands or {}
         self.report=report or (lambda stage,message:None)
         self.connection_error=None
         self.subscribe=subscribe
@@ -76,6 +77,7 @@ class MQTT:
                 self.connection_error={132:'unsupported_protocol',133:'invalid_client_id',134:'bad_credentials',135:'not_authorized',136:'server_unavailable',137:'server_busy',138:'banned'}.get(reason.value,'connection_rejected')
                 failure.set();return
             topics=[(self.request_topic,mqtt.SubscribeOptions(qos=1,retainAsPublished=True))] if self.subscribe else []
+            topics += [(topic, mqtt.SubscribeOptions(qos=1, retainAsPublished=True)) for topic in self.commands]
             if topics:
                 rc,mid=client.subscribe(topics)
                 if rc:failure.set()
@@ -89,6 +91,8 @@ class MQTT:
         def message(client, userdata, msg):
             if self.subscribe and msg.topic == self.request_topic and (self.accept_retained or not msg.retain) and len(msg.payload) <= 1048576:
                 self.trigger(msg.payload)
+            if msg.topic in self.commands and not msg.retain and len(msg.payload) <= 1024:
+                self.commands[msg.topic](msg.payload)
         client.on_publish=lambda client,userdata,mid,reason,props:self.publish_errors.__setitem__(mid,reason.is_failure)
         client.on_subscribe = subscribed
         client.on_connect = connected

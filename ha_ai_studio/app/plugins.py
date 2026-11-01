@@ -126,7 +126,9 @@ async def manifest(root):
     if path.stat().st_size>32768:raise Invalid('Action manifest is too large.')
     try:
         value=json.loads(path.read_text())
-        if set(value)-{'id','name','description','version','python','entrypoint','settings_schema','input_schema','output_schema','example','editor','capabilities'}:raise ValueError()
+        if set(value)-{'id','name','description','version','python','entrypoint','settings_schema','input_schema','output_schema','example','editor','capabilities','functions'}:raise ValueError()
+        functions=value.get('functions',[])
+        if not isinstance(functions,list) or any(f != 'execute' for f in functions) or len(functions)>1:raise Invalid('Invalid action functions.')
         capabilities=value.get('capabilities',[])
         if not isinstance(capabilities,list) or any(c not in ('assets','preview','home_assistant') for c in capabilities) or len(set(capabilities))!=len(capabilities):raise Invalid('Invalid action capabilities.')
         for key in ('id','name','description','version','python','entrypoint','settings_schema'):
@@ -156,6 +158,12 @@ async def manifest(root):
     except Invalid:raise
     except Exception:raise Invalid('Invalid action manifest.') from None
 
+def device_functions(metadata):
+    # Every trusted Action implements execute(data, settings). An explicit empty
+    # list may opt out; activation still validates the empty-input contract.
+    return list(metadata.get('functions', ['execute']))
+
+
 class GitPlugin:
     def __init__(self,record,source):
         self.record=copy.deepcopy(record);self.source=Path(source);self.manifest=record['manifest']
@@ -172,6 +180,8 @@ class GitPlugin:
             'example':copy.deepcopy(example),'capabilities':list(self.manifest.get('capabilities',[])),
             'source':record['repository_id'],'version':self.manifest['version'],'commit':record['commit'],'snapshot':record.get('snapshot'),'dynamic':True,'local':record.get('source_kind')=='local',
             'editor':f"plugin-assets/{record['snapshot']}/{record['type']}/{self.manifest['editor']}" if self.manifest.get('editor') else None}
+        if 'functions' in self.manifest:self.metadata['functions'] = list(self.manifest['functions'])
+        self.metadata['functions'] = device_functions(self.metadata)
     async def validate(self,value):
         if len(json.dumps(value,allow_nan=False).encode())>100000:raise Invalid('Action settings exceed 100000 bytes.')
         if not isinstance(value,dict) or not await schema_valid(self.manifest['settings_schema'],value):raise Invalid('Settings do not match the action schema.')

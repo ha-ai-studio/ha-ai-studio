@@ -81,6 +81,34 @@ async def main():
         before=copy.deepcopy(service.last);await service.test(config,'{"request_id":"ui","data":0}')
         assert before==service.last
         assert any(h=='broker2' and t=='discovery-check/result' and not r for h,t,p,r in seen)
+        # Explicit functions share the central discovery transport, never Action brokers.
+        with patch.dict(service.plugin.metadata, {'functions':['execute']}):
+            function_config=copy.deepcopy(device['draft'])
+            function_config['functions']=[{'id':'read-meter','name':'Read meter','action_id':'echo','function':'execute'}]
+            device=await studio.devices.save(device['id'],{'config':function_config,'enabled':True})
+        command=prefix+'/function/read-meter/request'
+        button=f'homeassistant/button/{prefix}/function_read-meter/config'
+        await until(lambda:any(t==button and p for h,t,p,r in seen))
+        from unittest.mock import AsyncMock
+        with patch.object(service,'execute',AsyncMock(return_value={'readings':[reading(),reading('serial','000123-AB','')]})) as execute:
+            await publish(a,command,'{"request_id":"wrong-a"}')
+            await publish(b,command,'{"request_id":"wrong-b"}')
+            await publish(c,command,'{"request_id":"retained"}',True)
+            await asyncio.sleep(.2)
+            assert execute.await_count==0
+            # A reconnect replays the retained request, which must still be rejected.
+            await asyncio.to_thread(studio.discovery.client.client._sock_close)
+            await asyncio.sleep(2)
+            await until(lambda:studio.discovery.client.ready.is_set())
+            assert execute.await_count==0
+            await publish(c,command,'{"request_id":"button-1"}')
+            await until(lambda:execute.await_count==1 and not studio.devices.busy(device['id']))
+            await publish(c,command,'{"request_id":"button-1"}')
+            await asyncio.sleep(.2)
+            assert execute.await_count==1
+            assert studio.devices.get(device['id'])['values']['water']['value']==123
+            await publish(c,command,'',True) # Clear the test-owned retained command.
+        assert not any(h!='broker3' and t==button for h,t,p,r in seen)
         # A retained HA birth is accepted, unlike Action requests; replay both config and state.
         birth_start=len(seen)
         count=sum(t==status for h,t,p,r in seen)
@@ -94,9 +122,15 @@ async def main():
         await until(lambda:sum(t==status for h,t,p,r in seen)>count)
         await until(lambda:any(t==prefix+'/status' and p==b'ready' for h,t,p,r in seen[reconnect_start:]))
         device_config=copy.deepcopy(device['draft']);device_config['name']='Renamed'
-        await studio.devices.save(device['id'],{'config':device_config,'activate':True})
+        with patch.dict(service.plugin.metadata, {'functions':['execute']}):
+            await studio.devices.save(device['id'],{'config':device_config,'activate':True})
         await until(lambda:any(t==status and b'Renamed' in p for h,t,p,r in seen))
         studio.devices.deactivate(device['id'])
+        await until(lambda:command not in studio.discovery.client.commands)
+        with patch.object(service,'execute',AsyncMock()) as execute:
+            await publish(c,command,'{"request_id":"disabled"}')
+            await asyncio.sleep(.2)
+            execute.assert_not_awaited()
         await service.deactivate()
         await until(lambda:any(t==prefix+'/status' and p==b'disabled' for h,t,p,r in seen))
         close_start=len(seen)
@@ -105,6 +139,7 @@ async def main():
         studio=Studio(root);service=studio.get('echo');await studio.start()
         await until(lambda:studio.discovery.status.startswith('Connected'))
         assert studio.discovery.desired()[status]['unique_id']==configs[status]['unique_id']
+        assert 'button-1' in studio.devices.get(device['id'])['function_requests']
         studio.devices.delete({'id':device['id'],'confirmed':True})
         await studio.delete({'id':'echo','confirmed':True})
         await until(lambda:any(t==status and p==b'' for h,t,p,r in seen))

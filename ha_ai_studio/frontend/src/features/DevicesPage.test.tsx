@@ -10,6 +10,7 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
   const actions = ["Reader", "Temperature"].map((name, i) => ({
     definition: { id: `action-${i}`, name, type: "fixture" },
     supported: true,
+    plugin: { functions: ["execute"] },
     enabled: false,
     config: {
       draft: { settings: { meters: [{ id: "main", name: "Main reading" }] } },
@@ -71,6 +72,10 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
             status: "ready",
           },
         };
+        result = devices[0];
+      } else if (endpoint === "device-function") {
+        expect(body.function_id).toBe("function-1");
+        expect(body.request_id).toEqual(expect.any(String));
         result = devices[0];
       } else if (endpoint === "device-deactivate") {
         devices[0].enabled = false;
@@ -143,6 +148,43 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
   expect(screen.getByLabelText("Measurement log")).toHaveTextContent(
     "Measurement finished: ready.",
   );
+  await userEvent.click(screen.getByRole("button", { name: "Add function" }));
+  expect(
+    screen.queryByRole("combobox", { name: "Function" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText(/Function ID/)).not.toBeVisible();
+  await userEvent.selectOptions(
+    screen.getByLabelText("Function action"),
+    "action-1",
+  );
+  await userEvent.clear(screen.getByLabelText("Function name"));
+  await userEvent.type(
+    screen.getByLabelText("Function name"),
+    "Read temperature",
+  );
+  expect(
+    screen.queryByLabelText("Expose in Home Assistant"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Run function" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Run function" })).toBeEnabled(),
+  );
+  expect(devices[0].active?.functions).toEqual([
+    {
+      id: "function-1",
+      name: "Read temperature",
+      action_id: "action-1",
+      function: "execute",
+    },
+  ]);
+  await userEvent.click(screen.getByRole("button", { name: "Run function" }));
+  await waitFor(() => expect(requests).toContain("device-function"));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Remove function" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(devices[0].active?.functions).toEqual([]));
   await userEvent.type(screen.getByLabelText("Device name"), " updated");
   expect(devices[0].active?.name).toBe("Water meter");
   expect(screen.getByRole("button", { name: "Read now" })).toBeDisabled();
@@ -167,9 +209,14 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
   await waitFor(() => expect(devices).toHaveLength(0));
   expect(
     requests.every((path) =>
-      ["devices", "actions", "device", "device-read", "delete-device"].includes(
-        path,
-      ),
+      [
+        "devices",
+        "actions",
+        "device",
+        "device-read",
+        "device-function",
+        "delete-device",
+      ].includes(path),
     ),
   ).toBe(true);
 });
