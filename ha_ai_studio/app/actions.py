@@ -7,6 +7,7 @@ import os
 import re
 import uuid
 from collections import deque
+from contextlib import AsyncExitStack
 from .domain import Invalid, stamp
 from .store import Store
 from .brokers import Brokers, topic_check
@@ -52,6 +53,7 @@ def digest(body):
 class ActionService:
     def __init__(self,root,definition,namespace,brokers,repositories=None):
         self.store=Store(root);self.definition=copy.deepcopy(definition);self.brokers=brokers
+        self.repositories=repositories
         self.type=definition.get('action_type')
         self.plugin=repositories.bound(definition['plugin']) if definition.get('plugin') and repositories else TYPES.get(self.type)
         self.supported=self.plugin is not None
@@ -148,11 +150,13 @@ class ActionService:
             'supported':self.supported,'config':copy.deepcopy(self.config),'enabled':self.enabled,'busy':self.busy,'mqtt':self.mqtt_status,
             'environment':self.environment.public() if self.environment else {'status':'Ready','logs':['Built-in action.']},
             'issues':issues if self.supported else ['Unsupported legacy workflow. Disabled; original files and IDs are preserved.'],
+            'versions':self.repositories.action_versions(self.plugin.record) if self.environment else [],
             'last':copy.deepcopy(self.last),'plugin':self.plugin.metadata if self.supported else None}
-    async def save(self,value,activate,*,set_enabled=None):
+    async def save(self,value,activate,*,set_enabled=None,expected_snapshot=None):
         if type(activate) is not bool:raise Invalid('Active must be true or false.')
         if set_enabled is not None and (type(set_enabled) is not bool or set_enabled!=activate):raise Invalid('Invalid Active state.')
         async with self.brokers.lock:
+            if expected_snapshot is not None and (not self.environment or self.plugin.record['snapshot']!=expected_snapshot):raise Invalid('Action version changed. Reload the action before saving settings.')
             self.ensure_idle();value=await self.check_config(value)
             self.ensure_idle()
             if activate:
@@ -356,6 +360,82 @@ class Studio:
             if self.running:service.task=asyncio.create_task(service.run())
             if service.environment:service.environment.start()
             return service.status()
+    def version_label(self,record):
+        return record['manifest']['version']+' · '+(record.get('release',{}).get('tag') or record['commit'][:12])
+    def version_guard(self,service):
+        service.ensure_idle()
+        if not service.environment:raise Invalid('Only repository actions support version selection.')
+        if service.enabled:raise Invalid('Deactivate the action before changing its version.')
+        if self.devices.references(service.definition['id'],active_only=True):raise Invalid('Deactivate devices using this action before changing its version.')
+    async def change_versions(self,targets):
+        # Call with broker and registry locks held. One registry write commits all bindings.
+        async with AsyncExitStack() as locks:
+            selected=[]
+            for target in targets:
+                if not isinstance(target,dict) or set(target)!={'id','snapshot','current'}:raise Invalid('Provide version targets from the preview.')
+                service=self.get(target['id']);self.version_guard(service)
+                if service.plugin.record['snapshot']!=target['current']:raise Invalid('Action version changed. Preview the update again.')
+                plugin=self.repositories.select(service.plugin.record,target['snapshot'])
+                await locks.enter_async_context(service.lock)
+                selected.append((service,plugin))
+            for service,plugin in selected:
+                await plugin.validate(service.config['draft']['settings'])
+            candidate=copy.deepcopy(self.registry)
+            for service,plugin in selected:
+                definition=next(d for d in candidate['agents'] if d['id']==service.definition['id'])
+                history=definition.setdefault('plugin_history',[])
+                if not any(r['snapshot']==service.plugin.record['snapshot'] for r in history):history.append(copy.deepcopy(service.plugin.record))
+                definition['plugin']=copy.deepcopy(plugin.record)
+            self.store.write('agents.json',candidate);self.registry=candidate
+            # Bind every instance before starting environments; a queue failure cannot leave
+            # the in-memory registry disagreeing with its durable batch commit.
+            for service,plugin in selected:
+                service.definition=copy.deepcopy(next(d for d in candidate['agents'] if d['id']==service.definition['id']))
+                service.plugin=plugin;service.environment.plugin=plugin
+            errors=[]
+            for service,plugin in selected:
+                try:service.environment.start()
+                except Exception:errors.append(service.definition['id'])
+            return errors
+    async def change_version(self,id,value):
+        if not isinstance(value,dict) or set(value)!={'snapshot'}:raise Invalid('Select a downloaded action version.')
+        async with self.brokers.lock,self.lock:
+            service=self.get(id);self.version_guard(service)
+            if value['snapshot']==service.plugin.record['snapshot']:return service.status()
+            errors=await self.change_versions([{'id':id,'snapshot':value['snapshot'],'current':service.plugin.record['snapshot']}])
+            result=service.status()
+            if errors:result['issues'].append('Version saved, but environment setup could not start. Rebuild the environment before use.')
+            return result
+    async def repository_actions(self,value,apply=False):
+        expected={'id','targets'} if apply else {'id'}
+        if not isinstance(value,dict) or set(value)!=expected or not isinstance(value['id'],str):raise Invalid('Provide repository ID and update targets.')
+        async with self.brokers.lock,self.lock:
+            repo=next((r for r in self.repositories.state['repositories'] if r['id']==value['id']),None)
+            if repo is None or repo.get('kind')=='local':raise Invalid('Select a Git or release repository.')
+            services=[s for s in self.services.values() if s.environment and s.plugin.record['repository_id']==repo['id']]
+            if apply:
+                targets=value['targets']
+                if not isinstance(targets,list) or not targets:raise Invalid('Preview action updates first.')
+                if any(not isinstance(t,dict) or not isinstance(t.get('id'),str) for t in targets):raise Invalid('Invalid update targets.')
+                ids=[t['id'] for t in targets]
+                if len(ids)!=len(set(ids)) or not set(ids)<=set(s.definition['id'] for s in services):raise Invalid('Invalid update targets.')
+                errors=await self.change_versions(targets)
+                return {'actions':[],'environment_errors':errors}
+            entries=[]
+            for service in services:
+                plugin=next((a for a in repo['actions'] if a['type']==service.type),None)
+                current=service.plugin.record['snapshot'];target=plugin['snapshot'] if plugin else None
+                reason=None
+                if target!=current:
+                    try:
+                        self.version_guard(service)
+                        if plugin is None:raise Invalid('Action type is missing from this repository version.')
+                        async with service.lock:
+                            selected=self.repositories.bound(plugin)
+                            await selected.validate(service.config['draft']['settings'])
+                    except Invalid as exc:reason=str(exc)
+                entries.append({'id':service.definition['id'],'name':service.config['draft']['name'],'current':current,'snapshot':target,'reason':reason,'current_label':self.version_label(service.plugin.record),'target_label':self.version_label(plugin) if plugin else 'Unavailable'})
+            return {'actions':entries,'environment_errors':[]}
     async def reload_source(self,id):
         async with self.brokers.lock:
             async with self.lock:

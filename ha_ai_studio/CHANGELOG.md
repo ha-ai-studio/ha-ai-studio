@@ -1,3 +1,13 @@
+## 0.0.15
+
+- Check Git and GitHub Release repositories for updates without changing existing Action instances.
+- Download repository versions side by side and retain a version history with release or commit links.
+- Select downloaded Action versions in General, including downgrades, while preserving identities, settings and request history.
+- Preview and apply repository-wide Action updates with inactive/idle guards, schema validation and atomic binding persistence.
+- Keep direct filesystem reloads for local development Actions and allow failed local imports to be retried.
+- Add compact repository controls with descriptive icons and tooltips, plus a right-aligned Apply version control.
+- Extend regression coverage for update detection, history migration, restart, downgrade, bulk updates and persistence failures.
+
 ## 0.0.14
 
 - Add configurable virtual Devices with independent measurement schedules, multiple sensors and optional Home Assistant MQTT discovery.

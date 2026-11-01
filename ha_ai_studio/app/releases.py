@@ -74,7 +74,7 @@ def unpack(data, target):
                 destination.write_bytes(archive.read(entry))
 
 
-async def fetch_release(url, ref, target):
+async def fetch_release(url, ref, target=None):
     repository = repository_url(url).removeprefix('https://github.com/')
     endpoint = 'latest' if ref == 'latest' else 'tags/' + quote(ref, safe='')
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120), trust_env=False,
@@ -95,6 +95,8 @@ async def fetch_release(url, ref, target):
         match = re.fullmatch(r'([a-f0-9]{64})  ' + re.escape(ASSET) + r'\n?', checksum)
         if not match:
             raise Invalid('Invalid release checksum.')
+        if target is None:
+            return {'tag': tag, 'release_id': release['id'], 'sha256': match[1]}
         data = await download(session, asset(ASSET), LIMIT)
     digest = hashlib.sha256(data).hexdigest()
     if digest != match[1]:

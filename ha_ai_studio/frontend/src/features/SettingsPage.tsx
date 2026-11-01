@@ -11,7 +11,13 @@ import {
 } from "../design-system";
 import { api, errorText } from "../lib/api";
 import { useOperation, usePoll } from "../lib/hooks";
-import type { Broker, Brokers, Discovery, Repository } from "../lib/types";
+import type {
+  Broker,
+  Brokers,
+  Discovery,
+  Repository,
+  VersionPreview,
+} from "../lib/types";
 import { ConfirmDelete } from "./ActionPanels";
 import { BrokerPanel, BrokerTestPanel } from "./BrokerPanels";
 function RepositoryPanel({
@@ -35,9 +41,9 @@ function RepositoryPanel({
       busy={op.busy}
       footer={
         <Button
+          variant="primary"
           form="repository-form"
           type="submit"
-          variant="primary"
           disabled={op.busy}
         >
           Add repository
@@ -128,6 +134,8 @@ type Panel =
   | { kind: "broker"; broker: Broker | null }
   | { kind: "test" | "delete-broker"; broker: Broker }
   | { kind: "repository" }
+  | { kind: "versions"; repo: Repository }
+  | { kind: "update-actions"; repo: Repository; preview: VersionPreview }
   | { kind: "delete-repository"; repo: Repository };
 export function SettingsPage() {
   const [brokers, setBrokers] = useState<Brokers>();
@@ -178,7 +186,10 @@ export function SettingsPage() {
         title="MQTT brokers"
         actions={
           <>
-            <Button
+            <IconButton
+              icon="search"
+              label="Find HA Broker"
+              showLabel
               disabled={op.busy}
               onClick={() =>
                 void op.run(async () => {
@@ -191,16 +202,13 @@ export function SettingsPage() {
                   );
                 })
               }
-            >
-              Find HA broker
-            </Button>
-            <Button
-              variant="primary"
+            />
+            <IconButton
+              icon="add"
+              label="Add broker"
               disabled={!brokers || !discovery || op.busy}
               onClick={() => setPanel({ kind: "broker", broker: null })}
-            >
-              Add broker
-            </Button>
+            />
           </>
         }
       >
@@ -272,13 +280,12 @@ export function SettingsPage() {
       <Card
         title="Action repositories"
         actions={
-          <Button
-            variant="primary"
+          <IconButton
+            icon="add"
+            label="Add repository"
             disabled={op.busy}
             onClick={() => setPanel({ kind: "repository" })}
-          >
-            Add repository
-          </Button>
+          />
         }
       >
         <p>
@@ -318,23 +325,92 @@ export function SettingsPage() {
                   {repo.ref}
                   {repo.release ? ` · ${repo.release.tag}` : ""}
                 </td>
-                <td>{repo.status}</td>
+                <td>
+                  {repo.status}
+                  {repo.update_available ? " · Update available" : ""}
+                  {repo.check_error && <p role="status">{repo.check_error}</p>}
+                  {repo.checked && (
+                    <div className="small muted">
+                      Last checked: {new Date(repo.checked).toLocaleString()}
+                    </div>
+                  )}
+                </td>
                 <td>
                   {repo.actions
                     .map((a) => a.manifest.name + " " + a.manifest.version)
                     .join(", ") || "—"}
                 </td>
                 <td className="row-actions">
+                  {repo.kind === "local" &&
+                    (repo.status === "Failed" || !repo.actions.length) && (
+                      <IconButton
+                        icon="refresh"
+                        label="Retry import"
+                        disabled={repo.refreshing || op.busy}
+                        onClick={() =>
+                          void op.run(async () => {
+                            await api("repository-refresh", { id: repo.id });
+                            await refresh();
+                          })
+                        }
+                      />
+                    )}
+                  {repo.kind !== "local" && (
+                    <>
+                      <IconButton
+                        icon="refresh"
+                        label="Check for updates"
+                        disabled={repo.refreshing || op.busy}
+                        onClick={() =>
+                          void op.run(async () => {
+                            await api("repository-check", { id: repo.id });
+                            await refresh();
+                          })
+                        }
+                      />
+                      <IconButton
+                        icon="package"
+                        label="Update"
+                        disabled={
+                          repo.refreshing ||
+                          op.busy ||
+                          (!repo.update_available && repo.status === "Ready")
+                        }
+                        onClick={() =>
+                          void op.run(async () => {
+                            await api("repository-refresh", { id: repo.id });
+                            await refresh();
+                            setMessage(
+                              "Downloading and validating a separate repository version. Existing actions keep their selected version; previous versions remain available.",
+                            );
+                          })
+                        }
+                      />
+                      <IconButton
+                        icon="updateAll"
+                        label="Update all actions"
+                        disabled={
+                          repo.refreshing || op.busy || !repo.actions.length
+                        }
+                        onClick={() =>
+                          void op.run(async () =>
+                            setPanel({
+                              kind: "update-actions",
+                              repo,
+                              preview: await api("repository-actions-preview", {
+                                id: repo.id,
+                              }),
+                            }),
+                          )
+                        }
+                      />
+                    </>
+                  )}
                   <IconButton
-                    icon="refresh"
-                    label={`Refresh repository ${repo.url}`}
-                    disabled={repo.refreshing || op.busy}
-                    onClick={() =>
-                      void op.run(async () => {
-                        await api("repository-refresh", { id: repo.id });
-                        await refresh();
-                      })
-                    }
+                    icon="history"
+                    label="Version history"
+                    disabled={op.busy}
+                    onClick={() => setPanel({ kind: "versions", repo })}
                   />
                   <IconButton
                     icon="delete"
@@ -390,6 +466,119 @@ export function SettingsPage() {
           close={close}
           saved={() => refresh()}
         />
+      )}
+      {panel?.kind === "versions" && (
+        <SidePanel
+          title="Version history"
+          onClose={close}
+          footer={<Button onClick={close}>Close</Button>}
+        >
+          <p>{panel.repo.url}</p>
+          <p>
+            Downloaded versions remain available. Each action keeps its selected
+            version until you explicitly change it in General.
+          </p>
+          {(panel.repo.versions || [])
+            .slice()
+            .reverse()
+            .map((item) => (
+              <Card
+                key={item.snapshot}
+                title={item.release?.tag || item.commit.slice(0, 12)}
+              >
+                <p>
+                  {item.actions
+                    .map(
+                      (action) =>
+                        `${action.manifest.name} ${action.manifest.version}`,
+                    )
+                    .join(", ")}
+                </p>
+                {item.downloaded && (
+                  <p className="small muted">
+                    Downloaded: {new Date(item.downloaded).toLocaleString()}
+                  </p>
+                )}
+                {item.url ? (
+                  <a href={item.url} target="_blank" rel="noreferrer">
+                    View {item.release ? "release" : "commit"}
+                  </a>
+                ) : (
+                  <code>{item.commit}</code>
+                )}
+              </Card>
+            ))}
+        </SidePanel>
+      )}
+      {panel?.kind === "update-actions" && (
+        <SidePanel
+          title="Update all actions"
+          onClose={close}
+          busy={op.busy}
+          footer={
+            <>
+              <Button disabled={op.busy} onClick={close}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                disabled={
+                  op.busy ||
+                  panel.preview.actions.some((item) => !!item.reason) ||
+                  !panel.preview.actions.some(
+                    (item) => item.snapshot !== item.current,
+                  )
+                }
+                onClick={() =>
+                  void op.run(async () => {
+                    const result = await api("repository-actions-update", {
+                      id: panel.repo.id,
+                      targets: panel.preview.actions
+                        .filter((item) => item.snapshot !== item.current)
+                        .map(({ id, snapshot, current }) => ({
+                          id,
+                          snapshot,
+                          current,
+                        })),
+                    });
+                    close();
+                    await refresh();
+                    setMessage(
+                      result.environment_errors.length
+                        ? "Versions saved. Some environments could not start; rebuild them before use."
+                        : "Action versions saved. Preparing Python environments. Actions remain inactive.",
+                    );
+                  })
+                }
+              >
+                Update actions
+              </Button>
+            </>
+          }
+        >
+          <Notice error>{op.error}</Notice>
+          <p>
+            Use the currently downloaded repository version. All affected
+            actions must be inactive and idle. Settings are validated before any
+            version is changed.
+          </p>
+          {panel.preview.actions.map((item) => (
+            <Card key={item.id} title={item.name}>
+              <p>
+                {item.current_label} → {item.target_label}
+              </p>
+              <p>
+                {item.reason ||
+                  (item.snapshot === item.current
+                    ? "Already using this version"
+                    : "Ready to update")}
+              </p>
+            </Card>
+          ))}
+          {!panel.preview.actions.length && (
+            <p>No actions use this repository.</p>
+          )}
+        </SidePanel>
       )}
       {panel?.kind === "delete-repository" && (
         <ConfirmDelete

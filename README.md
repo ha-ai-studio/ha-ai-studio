@@ -50,6 +50,18 @@ The MQTT check uses three temporary isolated Mosquitto brokers, never personal c
 
 CI builds the amd64 image once, running the React regression tests and TypeScript checks in its frontend build stage, then shares it as a workflow artifact with four parallel GitHub Actions matrix jobs: unit/API/package, MQTT, TLS/topic-permission and security. Each job has its own runner, logs and status; a failed suite does not cancel the others. Downloaded images are checked against the build job’s image ID. The final gate requires every suite to pass. Image artifacts are retained for seven days; rerunning failed jobs after expiry requires a full workflow rerun. For the same checks locally, run `docker compose build --quiet` followed by `python3 scripts/parallel_checks.py`. The local runner prints grouped logs and waits for every check; any failure blocks publication. Release CI pushes the exact tested image only after all checks pass. Security checks have separate steps for secrets, Python dependencies, Grype database updates and image scanning. CI caches only the Grype database (with daily cache keys), keeps automatic updates and age/hash validation enabled, and scans the downloaded image archive without exporting it again. Locally, `./scripts/security-check.sh` still runs every check; `SECURITY_GRYPE_CACHE_DIR` selects a cache directory and `SECURITY_IMAGE_ARCHIVE` optionally selects an existing image archive. `./scripts/test.sh` still builds by default; `--skip-build` uses the existing image.
 
+## Action repository versions
+
+Git and GitHub Release sources are checked at startup and every 15 minutes. **Check for updates** also runs a metadata-only check. Git follows the configured ref; a fixed commit stays pinned. Release sources follow `latest` or their configured stable release tag.
+
+**Update** downloads and validates a separate immutable snapshot. Existing instances keep their selected version. **Version history** lists downloaded action types and versions with release or commit links where supported. Previous snapshots remain available, including versions never used by an instance. Existing catalogs and still-present historical instance snapshots are recovered; previously deleted snapshots cannot be reconstructed automatically.
+
+In an Action's **General** card, select **Version**, then **Apply version** to upgrade or downgrade. Save or discard configuration edits first. The Action must be inactive and idle, and devices using it must be inactive. Saved draft settings must pass the target schema. Studio preserves identity, settings, request history and cached results, then prepares a separate instance environment; wait for **Ready** before activation. If environment setup fails, the selected version remains saved and execution is blocked until the environment is rebuilt or another version is selected.
+
+**Update all actions** previews current and target versions for instances from that repository. Blocked instances prevent the batch; applying rechecks the previewed bindings and commits the bindings together before building environments. It does not activate Actions. A new repository update arriving after preview does not change its pinned targets.
+
+Local development sources keep **Reload from source** on the Action. It captures current filesystem contents as an immutable snapshot; execution never follows working-directory edits. A failed initial local import can be retried in Settings.
+
 ## Repository layout
 
 - `ha_ai_studio/`: installable HA app, Python runtime, React/TypeScript/SCSS frontend, dependency locks and user guide.

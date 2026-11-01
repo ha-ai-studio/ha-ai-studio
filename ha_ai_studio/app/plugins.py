@@ -13,7 +13,7 @@ import re
 import shutil
 import signal
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote
 import uuid
 import weakref
 from .domain import Invalid, stamp
@@ -170,7 +170,7 @@ class GitPlugin:
         self.metadata={'type':record['type'],'name':self.manifest['name'],'description':self.manifest['description'],
             'input_schema':input_schema,'output_schema':output_schema,'settings_schema':copy.deepcopy(self.manifest['settings_schema']),
             'example':copy.deepcopy(example),'capabilities':list(self.manifest.get('capabilities',[])),
-            'source':record['repository_id'],'version':self.manifest['version'],'commit':record['commit'],'dynamic':True,'local':record.get('source_kind')=='local',
+            'source':record['repository_id'],'version':self.manifest['version'],'commit':record['commit'],'snapshot':record.get('snapshot'),'dynamic':True,'local':record.get('source_kind')=='local',
             'editor':f"plugin-assets/{record['snapshot']}/{record['type']}/{self.manifest['editor']}" if self.manifest.get('editor') else None}
     async def validate(self,value):
         if len(json.dumps(value,allow_nan=False).encode())>100000:raise Invalid('Action settings exceed 100000 bytes.')
@@ -186,11 +186,83 @@ def system_repository(url):
 class Repositories:
     def __init__(self,root):
         self.store=Store(Path(root)/'repositories');self.state=self.store.read('catalog.json',{'repositories':[]})
-        self.lock=asyncio.Lock();self.tasks={};self.active_snapshots=set()
+        self.lock=asyncio.Lock();self.tasks={};self.active_snapshots=set();self.monitor_task=None
         configured=os.getenv('HA_AI_STUDIO_LOCAL_ACTIONS') if os.getenv('HA_AI_STUDIO_DEV')=='1' else None
         self.local_root=Path(configured).resolve() if configured else None
         for repo in self.state['repositories']:
             if repo['status']=='Syncing':repo.update(status='Failed',logs=['Repository sync interrupted. Refresh to retry.'])
+    def versions(self,repo):
+        # Recover available pre-history bindings without inventing missing versions.
+        versions=copy.deepcopy(repo.get('versions',[]))
+        records=list(repo.get('actions',[]))
+        registry=Store(self.store.root.parent).read('agents.json',{})
+        for definition in registry.get('agents',[])+registry.get('deleted',[]):
+            records.extend(([definition['plugin']] if definition.get('plugin') else [])+definition.get('plugin_history',[]))
+        for record in records:
+            if not {'repository_id','snapshot','commit','type','manifest','directory'} <= record.keys():continue
+            if record['repository_id']!=repo['id']:continue
+            if not (self.store.root/'sources'/record['snapshot']).is_dir():continue
+            version=next((v for v in versions if v['snapshot']==record['snapshot']),None)
+            if version is None:
+                version={'snapshot':record['snapshot'],'commit':record['commit'],'release':record.get('release'),'actions':[]}
+                versions.append(version)
+            if not any(a['type']==record['type'] for a in version['actions']):version['actions'].append(copy.deepcopy(record))
+        return versions
+    def version_link(self,repo,record):
+        url=repo['url'].rstrip('/').removesuffix('.git')
+        if repo.get('kind')=='local':return None
+        parsed=urlsplit(url)
+        if parsed.scheme!='https' or parsed.username or parsed.password:return None
+        if record.get('release') and parsed.hostname=='github.com':return url+'/releases/tag/'+quote(record['release']['tag'],safe='')
+        if parsed.hostname=='github.com':return url+'/commit/'+record['commit']
+        if parsed.hostname=='gitlab.com':return url+'/-/commit/'+record['commit']
+        if parsed.hostname=='bitbucket.org':return url+'/commits/'+record['commit']
+        return None
+    def action_versions(self,record):
+        repo=next((r for r in self.state['repositories'] if r['id']==record['repository_id']),None)
+        if repo is None:return []
+        return [{ 'snapshot':a['snapshot'],'version':a['manifest']['version'],'commit':a['commit'],
+                  'release':a.get('release'),'url':self.version_link(repo,a)}
+                for v in self.versions(repo) for a in v['actions'] if a['type']==record['type']]
+    def select(self,record,snapshot):
+        if not isinstance(snapshot,str):raise Invalid('Select a downloaded action version.')
+        repo=next((r for r in self.state['repositories'] if r['id']==record['repository_id']),None)
+        for version in self.versions(repo) if repo else []:
+            for action in version['actions']:
+                if action['type']==record['type'] and action['snapshot']==snapshot:return self.bound(action)
+        raise Invalid('Downloaded action version not found.')
+    def check(self,id):
+        if id in self.tasks and not self.tasks[id].done():raise Invalid('Repository operation is already running.')
+        repo=next((r for r in self.state['repositories'] if r['id']==id),None)
+        if repo is None or repo.get('kind')=='local':raise Invalid('Select a Git or release repository.')
+        self.tasks[id]=asyncio.create_task(self.check_update(id))
+    async def check_update(self,id):
+        repo=next(r for r in self.state['repositories'] if r['id']==id)
+        try:
+            if repo.get('kind')=='release':
+                release=await fetch_release(repo['url'],repo['ref'])
+                commit=release['sha256']
+            else:
+                release=None
+                if re.fullmatch(r'[a-fA-F0-9]{40}',repo['ref']):commit=repo['ref'].lower()
+                else:
+                    output=(await process(['git','-c','protocol.file.allow=never','ls-remote','--',repo['url'],repo['ref'],repo['ref']+'^{}'],capture=True)).decode()
+                    rows=[line.split() for line in output.splitlines() if line.strip()]
+                    if not rows:raise Invalid('Git ref not found.')
+                    peeled=[row for row in rows if row[1].endswith('^{}')]
+                    commits={row[0] for row in peeled or rows}
+                    if len(commits)!=1:raise Invalid('Git ref is ambiguous.')
+                    commit=commits.pop()
+            await self.update(id,available={'commit':commit,'release':release},update_available=(commit!=repo.get('commit') or (release is not None and release!=repo.get('release'))),checked=stamp(),check_error=None)
+        except asyncio.CancelledError:raise
+        except Exception:
+            await self.update(id,checked=stamp(),check_error='Update check failed. Check repository access and configured ref.')
+    async def monitor(self):
+        while True:
+            for repo in list(self.state['repositories']):
+                if repo.get('kind')!='local' and repo.get('actions') and not (repo['id'] in self.tasks and not self.tasks[repo['id']].done()):
+                    self.check(repo['id'])
+            await asyncio.sleep(900)
     def start(self):
         # Bootstrap only metadata. Never create instances or execute repository code.
         repo=next((r for r in self.state['repositories'] if system_repository(r['url'])),None)
@@ -200,12 +272,15 @@ class Repositories:
             candidate=copy.deepcopy(self.state);candidate['repositories'].append(repo)
             self.store.write('catalog.json',candidate);self.state=candidate
         if repo['status'] in ('Not synced','Failed'):self.refresh(repo['id'])
+        if self.monitor_task is None or self.monitor_task.done():self.monitor_task=asyncio.create_task(self.monitor())
     def public(self):
         value=copy.deepcopy(self.state)
         value['local_available']=self.local_root is not None and self.local_root.is_dir()
         registry=Store(self.store.root.parent).read('agents.json',{})
         used={d['plugin']['repository_id'] for d in registry.get('agents',[]) if d.get('plugin')}
         for repo in value['repositories']:
+            repo['versions']=self.versions(repo)
+            for version in repo['versions']:version['url']=self.version_link(repo,version)
             repo['system']=system_repository(repo['url'])
             repo['in_use']=repo['id'] in used
             repo['refreshing']=repo['id'] in self.tasks and not self.tasks[repo['id']].done()
@@ -301,7 +376,7 @@ class Repositories:
             candidate=copy.deepcopy(self.state);repo=next(r for r in candidate['repositories'] if r['id']==id);repo.update(fields)
             self.store.write('catalog.json',candidate);self.state=candidate
     async def prune_sources(self):
-        protected={r['snapshot'] for repo in self.state['repositories'] for r in repo['actions']}|self.active_snapshots
+        protected={v['snapshot'] for repo in self.state['repositories'] for v in self.versions(repo)}|self.active_snapshots
         registry=Store(self.store.root.parent).read('agents.json',{})
         for definition in registry.get('agents',[])+registry.get('deleted',[]):
             if definition.get('plugin'):protected.add(definition['plugin']['snapshot'])
@@ -325,7 +400,7 @@ class Repositories:
             else:
                 await process(['git','init','--quiet',target])
                 await process(['git','-C',target,'-c','protocol.file.allow=never','fetch','--depth=1','--no-tags','--',repo['url'],repo['ref']])
-                commit=(await process(['git','-C',target,'rev-parse','FETCH_HEAD'],capture=True)).decode().strip()
+                commit=(await process(['git','-C',target,'rev-parse','FETCH_HEAD^{commit}'],capture=True)).decode().strip()
                 await process(['git','-C',target,'-c','core.hooksPath=/dev/null','checkout','--detach','--quiet',commit])
             if any(p.is_symlink() for p in target.rglob('*')):raise Invalid('Repository symlinks are unsupported.')
             actions=[];base=target/'actions'
@@ -338,7 +413,13 @@ class Repositories:
                 actions.append({'type':f"git-{id}-{data['id']}",'repository_id':id,'commit':commit,'snapshot':snapshot,'directory':str(directory.relative_to(target)),'manifest':data,'source_kind':repo.get('kind','git'),**({'release':release_info} if release_info else {})})
             if not actions or len(actions)>64:raise Invalid('Repository must contain 1 to 64 actions.')
             shutil.rmtree(target/'.git',ignore_errors=True)
-            await self.update(id,status='Ready',actions=actions,commit=commit,**({'release':release_info} if release_info else {}),logs=['Repository validated. No action code was executed.'],updated=stamp())
+            versions=self.versions(repo)
+            existing=next((v for v in versions if v['commit']==commit and v.get('release')== (release_info or None) and {a['type'] for a in v['actions']}=={a['type'] for a in actions}),None)
+            if existing:
+                actions=existing['actions']
+            else:
+                versions.append({'snapshot':snapshot,'commit':commit,'release':release_info or None,'actions':copy.deepcopy(actions),'downloaded':stamp()})
+            await self.update(id,status='Ready',actions=actions,commit=commit,versions=versions,update_available=False,available=None,check_error=None,**({'release':release_info} if release_info else {}),logs=['Repository validated. No action code was executed.'],updated=stamp())
         except asyncio.CancelledError:
             shutil.rmtree(target,ignore_errors=True);raise
         except Exception:
@@ -348,6 +429,9 @@ class Repositories:
             self.active_snapshots.discard(snapshot)
             await self.prune_sources()
     async def close(self):
+        if self.monitor_task:
+            self.monitor_task.cancel()
+            await asyncio.gather(self.monitor_task,return_exceptions=True)
         for task in self.tasks.values():
             if not task.done():task.cancel()
         await asyncio.gather(*self.tasks.values(),return_exceptions=True)
@@ -362,6 +446,8 @@ class Environment:
             self.set('Failed','Environment is missing or incompatible. Rebuild the environment.')
     def public(self):
         value=copy.deepcopy(self.state)
+        if value['status']=='Ready' and not self.ready:
+            value.update(status='Failed',logs=['Environment does not match the selected version. Rebuild it before use.'])
         if value['status'] in ('Queued','Installing','Verifying') and (self.task is None or self.task.done()):
             value.update(status='Failed',logs=value['logs']+['Installation stopped. Rebuild to retry.'])
         return value

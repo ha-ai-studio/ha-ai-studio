@@ -106,10 +106,16 @@ def create_app(root=None, dev=None):
             if request.method=='POST':return web.json_response(await studio.repositories.save(await request.json()))
         if action == 'repository-delete' and request.method=='POST':
             return web.json_response(await studio.delete_repository(await request.json()))
-        if action == 'repository-refresh' and request.method=='POST':
+        if action in ('repository-actions-preview','repository-actions-update') and request.method=='POST':
+            return web.json_response(await studio.repository_actions(await request.json(),apply=action=='repository-actions-update'))
+        if action == 'action-version' and request.method=='POST':
+            return web.json_response(await studio.change_version(request.query.get('id'),await request.json()))
+        if action in ('repository-refresh','repository-check') and request.method=='POST':
             value=await request.json()
             if not isinstance(value,dict) or set(value)!={'id'} or not isinstance(value['id'],str):raise Invalid('Provide repository ID.')
-            studio.repositories.refresh(value['id']);return web.json_response(studio.repositories.public())
+            if action=='repository-check':studio.repositories.check(value['id'])
+            else:studio.repositories.refresh(value['id'])
+            return web.json_response(studio.repositories.public())
         if action == 'reload-source' and request.method=='POST':
             return web.json_response(await studio.reload_source(request.query.get('id')))
         if action == 'environment' and request.method=='POST':
@@ -150,7 +156,7 @@ def create_app(root=None, dev=None):
             if action=='action':
                 if 'enabled' in value:
                     if type(value['enabled']) is not bool or 'activate' in value:raise Invalid('Provide one boolean Active state.')
-                    result=await service.save(value.get('config'),value['enabled'],set_enabled=value['enabled'])
+                    result=await service.save(value.get('config'),value['enabled'],set_enabled=value['enabled'],expected_snapshot=value.get('snapshot'))
                 else:result=await service.save(value.get('config'),value.get('activate'))
             elif action=='deactivate':result=await service.deactivate()
             else:

@@ -25,6 +25,17 @@ export function Button({
   );
 }
 const icons = {
+  apply:
+    "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm-1.5-5.5L7 11l-1.4 1.4 4.9 4.9 8-8L17.1 7.9l-6.6 6.6z",
+  add: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+  search:
+    "M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.71.71l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0A4.5 4.5 0 1 1 9.5 5a4.5 4.5 0 0 1 0 9z",
+  history:
+    "M13 3a9 9 0 0 0-9 9H1l4 4 4-4H6a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 13 3zm-1 5v5l4.25 2.52.75-1.23-3.5-2.08V8H12z",
+  package:
+    "M12 2 2 7v10l10 5 10-5V7L12 2zm0 2.24L18.53 7 12 9.76 5.47 7 12 4.24zM4 8.62l7 3.5v7.64l-7-3.5V8.62zm9 11.14v-7.64l7-3.5v7.64l-7 3.5z",
+  updateAll:
+    "M12 2 2 7l10 5 10-5-10-5zm0 2.24L17.53 7 12 9.76 6.47 7 12 4.24zM3 10l-1 2 10 5 10-5-1-2-9 4.5L3 10zm0 5-1 2 10 5 10-5-1-2-9 4.5L3 15z",
   refresh:
     "M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z",
   installation: "M9 3h6v8h4l-7 7-7-7h4V3zM5 19h14v2H5v-2z",
@@ -37,15 +48,17 @@ const icons = {
 export function IconButton({
   icon,
   label,
+  showLabel = false,
   ...props
 }: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> & {
   icon: keyof typeof icons;
   label: string;
+  showLabel?: boolean;
 }) {
   return (
     <Button
       variant={icon === "delete" ? "danger" : "default"}
-      className="icon-button"
+      className={`icon-button${showLabel ? " with-label" : ""}`}
       aria-label={label}
       title={label}
       {...props}
@@ -53,6 +66,7 @@ export function IconButton({
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d={icons[icon]} />
       </svg>
+      {showLabel && <span>{label}</span>}
     </Button>
   );
 }
