@@ -541,3 +541,60 @@ describe("Action version selection", () => {
     ).toBeDisabled();
   });
 });
+
+it.each(["Queued", "Installing", "Verifying"])(
+  "waits for the environment before showing configuration (%s)",
+  async (status) => {
+    const value = action();
+    value.environment.status = status;
+    value.issues = [
+      "Execution blocked: Python environment is not ready. Deactivate and rebuild it.",
+    ];
+    mockApi(value);
+    render(
+      <ActionEditor
+        id="fixture"
+        back={() => {}}
+        onDirty={() => {}}
+        onBusy={() => {}}
+      />,
+    );
+    expect(await screen.findByRole("progressbar")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    value.environment.status = "Ready";
+    value.issues = [];
+    expect(
+      await screen.findByLabelText("Name", {}, { timeout: 3500 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  },
+);
+
+it("keeps failed environments gated and exposes recovery details", async () => {
+  const value = action();
+  value.environment.status = "Failed";
+  mockApi(value);
+  render(
+    <ActionEditor
+      id="fixture"
+      back={() => {}}
+      onDirty={() => {}}
+      onBusy={() => {}}
+    />,
+  );
+  expect(
+    await screen.findByText("Action environment needs attention"),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Installation details" }),
+  );
+  expect(
+    screen.getByRole("button", { name: "Rebuild environment" }),
+  ).toBeEnabled();
+});

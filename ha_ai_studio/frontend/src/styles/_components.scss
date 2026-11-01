@@ -573,3 +573,36 @@ tr:last-child td {
     color: var(--accent);
   }
 }
+
+.environment-preparation {
+  max-width: 640px;
+  margin: 32px auto;
+}
+.environment-progress {
+  height: 6px;
+  margin: 24px 0;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #d5effa;
+  span {
+    display: block;
+    width: 40%;
+    height: 100%;
+    background: #03a9f4;
+    animation: environment-progress 1.6s ease-in-out infinite;
+  }
+}
+@keyframes environment-progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .environment-progress span {
+    animation: none;
+    margin: auto;
+  }
+}

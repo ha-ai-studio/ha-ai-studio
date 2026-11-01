@@ -17,7 +17,12 @@ import type {
   Json,
   Route,
 } from "../lib/types";
-import { DraftTest, ExamplePanel, SchemasPanel } from "./ActionPanels";
+import {
+  DraftTest,
+  EnvironmentPanel,
+  ExamplePanel,
+  SchemasPanel,
+} from "./ActionPanels";
 import { LegacyEditor, readSettings, SchemaEditor } from "./SchemaEditor";
 function BrokerSelect({
   label,
@@ -79,6 +84,8 @@ export function ActionEditor({
     null,
   );
   const [panelConfig, setPanelConfig] = useState<Configuration>();
+  const [showEnvironment, setShowEnvironment] = useState(false);
+  const [pollError, setPollError] = useState("");
   const [message, setMessage] = useState("");
   const op = useOperation();
   const version = useRef(0);
@@ -126,7 +133,14 @@ export function ActionEditor({
   }, [id]);
   usePoll(async (signal) => {
     const generation = version.current;
-    const value = await api("action", undefined, id, signal);
+    let value: ActionState;
+    try {
+      value = await api("action", undefined, id, signal);
+      if (!signal.aborted) setPollError("");
+    } catch (error) {
+      if (!signal.aborted) setPollError(errorText(error));
+      return;
+    }
     if (
       !signal.aborted &&
       generation === version.current &&
@@ -201,6 +215,76 @@ export function ActionEditor({
         <Notice>{state.issues.join(" ")}</Notice>
       </section>
     );
+  if (state.plugin?.dynamic && state.environment.status !== "Ready") {
+    const preparing = ["Queued", "Installing", "Verifying"].includes(
+      state.environment.status,
+    );
+    const step =
+      state.environment.status === "Queued"
+        ? "Waiting for environment preparation to start…"
+        : state.environment.status === "Verifying"
+          ? "Checking the action and its Python runner…"
+          : "Creating an isolated Python environment and installing dependencies…";
+    return (
+      <section>
+        <Button variant="text" onClick={back} disabled={op.busy}>
+          ← Actions
+        </Button>
+        <h1>{state.definition.name}</h1>
+        <div className="environment-preparation">
+          <Card
+            title={
+              preparing
+                ? "Preparing your action"
+                : "Action environment needs attention"
+            }
+          >
+            <p className="muted">
+              {preparing
+                ? "We are preparing the Python environment for this action. Configuration will open automatically when everything is ready."
+                : "The Python environment is not ready. Open installation details to review the status and rebuild it."}
+            </p>
+            {preparing && (
+              <div
+                className="environment-progress"
+                role="progressbar"
+                aria-label="Preparing action environment"
+              >
+                <span />
+              </div>
+            )}
+            <p role="status">{preparing ? step : state.environment.status}</p>
+            <Notice error>{op.error || pollError}</Notice>
+            <div className="actions">
+              {!preparing && state.enabled && (
+                <Button
+                  disabled={op.busy || state.busy}
+                  onClick={() => {
+                    version.current++;
+                    void op.run(async () => {
+                      setState(await api("deactivate", {}, id));
+                      setEnabled(false);
+                    });
+                  }}
+                >
+                  Deactivate
+                </Button>
+              )}
+              <Button onClick={() => setShowEnvironment(true)}>
+                Installation details
+              </Button>
+            </div>
+          </Card>
+        </div>
+        {showEnvironment && (
+          <EnvironmentPanel
+            initial={state}
+            close={() => setShowEnvironment(false)}
+          />
+        )}
+      </section>
+    );
+  }
   const ready =
     !staleVersion &&
     !editorBusy &&
@@ -305,7 +389,7 @@ export function ActionEditor({
             : message}
       </p>
       <Notice error>
-        {op.error || loadingError || state.issues.join(" ")}
+        {op.error || loadingError || pollError || state.issues.join(" ")}
       </Notice>
       {staleVersion && (
         <Notice error>
