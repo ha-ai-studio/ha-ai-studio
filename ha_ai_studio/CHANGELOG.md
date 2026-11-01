@@ -1,3 +1,10 @@
+## 0.0.20
+
+- Run Python tests in four independent CI jobs using the same verified image; keep MQTT, TLS and security checks parallel and require every group to pass.
+- Reduce redundant Action environment setup in asset tests without removing real runner coverage.
+- Automatically include new Python test modules and verify complete, non-overlapping group assignment and failure propagation.
+- Include plugin Device templates alongside the sensor history and Leak detection support from 0.0.19.
+
 ## 0.0.19
 
 - Add bounded, read-only sensor history access for trusted Actions using server-owned Home Assistant credentials.

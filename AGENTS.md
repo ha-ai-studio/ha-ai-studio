@@ -17,6 +17,11 @@
 - Use the HA AI Studio naming consistently. Preserve private data and broker credentials; future identity changes require an explicit migration. Old agents/workflows are unsupported and inactive; never automatically convert them to Echo.
 - Never expose broker credentials in browser responses or logs. Do not include private data, images, addresses or secrets in public files/packages.
 
+## Release versioning
+- For every version bump, update `ha_ai_studio/config.yaml` (the Home Assistant app version), `VERSION` in `ha_ai_studio/app/discovery.py`, and `ha_ai_studio/CHANGELOG.md` together. This repository uses `config.yaml`, not `config.yml`.
+- Validate the intended tag with `python3 scripts/release_metadata.py --tag vMAJOR.MINOR.PATCH --repository ha-ai-studio/ha-ai-studio` before committing the release. Keep the release tag and all version fields consistent.
+- Check that the previous release tag is included in the release ancestry, preserving changes already published from a separate branch.
+
 ## Scope and verification
 - Work only in this development copy; do not change live HA or ESPHome, publish or deploy without an explicit request.
 - Isolate every development worktree's Docker environment. Use unique image tags, Compose project/container/network names, host ports and data directories. Never overwrite or restart another worktree's containers or reuse its private state. A unique Compose project name alone is insufficient: this repository also hard-codes an image tag and host ports, so override those explicitly.
