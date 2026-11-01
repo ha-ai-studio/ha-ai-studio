@@ -87,6 +87,13 @@ def create_app(root=None, dev=None):
             return web.json_response(read(studio.get(request.query.get('id')),request.query.get('run','')))
         if action=='ha-entities' and request.method=='GET':
             return web.json_response(await studio.home_assistant.search(request.query.get('domains','camera,light,switch').split(','),request.query.get('q','')))
+        if action == 'device-template' and request.method == 'GET':
+            return web.json_response(studio.devices.export_template(request.query.get('id')))
+        if action == 'device-template-preview' and request.method == 'POST':
+            config = studio.devices.template_config(await request.json())
+            return web.json_response({'format': 'ha-ai-studio-device-template', 'version': 1, 'config': config})
+        if action == 'device-template-import' and request.method == 'POST':
+            return web.json_response(studio.devices.import_template(await request.json()))
         if action == 'devices':
             if request.method == 'GET':return web.json_response(studio.devices.list())
             if request.method == 'POST':return web.json_response(studio.devices.create(await request.json()))

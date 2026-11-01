@@ -138,7 +138,16 @@ export interface LiveData {
   gap: boolean;
   events: LiveEvent[];
 }
+export interface DeviceTemplate {
+  format: "ha-ai-studio-device-template";
+  version: 1;
+  config: DeviceConfig;
+}
+
 export interface ApiResponses {
+  "device-template": DeviceTemplate;
+  "device-template-preview": DeviceTemplate;
+  "device-template-import": DeviceState;
   devices: { devices: DeviceState[] };
   device: DeviceState;
   "device-read": DeviceState;

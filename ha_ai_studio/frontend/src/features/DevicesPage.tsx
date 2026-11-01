@@ -4,6 +4,7 @@ import {
   Card,
   Checkbox,
   DataTable,
+  IconButton,
   Input,
   LogView,
   Notice,
@@ -21,6 +22,7 @@ import type {
   DeviceState,
 } from "../lib/types";
 import { ConfirmDelete } from "./ActionPanels";
+import { ImportDeviceTemplate, exportDeviceTemplate } from "./DeviceTemplates";
 const date = (value?: string | null) =>
   value ? new Date(value).toLocaleString() : "No reading yet";
 
@@ -29,6 +31,7 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [create, setCreate] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [name, setName] = useState("");
   const [remove, setRemove] = useState<DeviceState>();
   const op = useOperation();
@@ -49,7 +52,7 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
     void refresh(c.signal);
     return () => c.abort();
   }, []);
-  usePoll(refresh, !create && !remove && !op.busy);
+  usePoll(refresh, !create && !importing && !remove && !op.busy);
   return (
     <section>
       <div className="heading">
@@ -60,9 +63,12 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
             sensors and functions.
           </p>
         </div>
-        <Button variant="primary" onClick={() => setCreate(true)}>
-          Create device
-        </Button>
+        <div className="actions">
+          <Button onClick={() => setImporting(true)}>Import template</Button>
+          <Button variant="primary" onClick={() => setCreate(true)}>
+            Create device
+          </Button>
+        </div>
       </div>
       <Notice error>{error || op.error}</Notice>
       <DataTable
@@ -95,14 +101,23 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
             </td>
             <td>{item.status}</td>
             <td className="row-actions">
-              <Button onClick={() => open(item.id)}>Edit</Button>
-              <Button
+              <IconButton
+                icon="edit"
+                label={`Edit ${item.draft.name}`}
+                onClick={() => open(item.id)}
+              />
+              <IconButton
+                icon="installation"
+                label={`Export template ${item.draft.name}`}
+                disabled={op.busy}
+                onClick={() => void op.run(() => exportDeviceTemplate(item.id))}
+              />
+              <IconButton
+                icon="delete"
+                label={`Delete ${item.draft.name}`}
                 disabled={item.busy || op.busy}
-                variant="danger"
                 onClick={() => setRemove(item)}
-              >
-                Delete
-              </Button>
+              />
             </td>
           </tr>
         ))}
@@ -113,6 +128,9 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
           Create a virtual device, assign its measurement actions, and activate
           it when ready.
         </p>
+      )}
+      {importing && (
+        <ImportDeviceTemplate close={() => setImporting(false)} open={open} />
       )}
       {create && (
         <SidePanel

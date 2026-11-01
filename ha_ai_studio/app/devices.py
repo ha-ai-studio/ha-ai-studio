@@ -113,9 +113,16 @@ class Devices:
             raise Invalid('Provide a device name.')
         if len(self.data['items']) >= 32:
             raise Invalid('Maximum of 32 devices.')
-        id = 'device-' + uuid.uuid4().hex[:16]
         config = {'name': value['name'].strip(), 'interval_minutes': 30,
                   'publish': False, 'sensors': [], 'functions': []}
+        return self.create_config(config)
+
+    def create_config(self, config):
+        if len(self.data['items']) >= 32:
+            raise Invalid('Maximum of 32 devices.')
+        id = 'device-' + uuid.uuid4().hex[:16]
+        while id in self.data['items'] or any(item['id'] == id for item in self.data['deleted']):
+            id = 'device-' + uuid.uuid4().hex[:16]
         candidate = copy.deepcopy(self.data)
         candidate['items'][id] = {'id': id, 'identity': self.studio.namespace + '_' + id,
             'draft': config, 'active': None, 'enabled': False, 'bindings': {}, 'values': {},
@@ -123,7 +130,44 @@ class Devices:
         self.commit(candidate)
         return self.public(id)
 
-    def validate(self, config):
+    def export_template(self, id):
+        config = copy.deepcopy(self.get(id)['draft'])
+        # Transfer configuration only, never runtime state, identities or Action settings.
+        config['publish'] = False
+        bindings = {}
+        for entry in config['sensors'] + config['functions']:
+            if 'rate' in entry:continue
+            action_id = entry['action_id']
+            if action_id not in bindings:bindings[action_id] = 'action-' + str(len(bindings) + 1)
+            entry['action_id'] = bindings[action_id]
+        return {'format': 'ha-ai-studio-device-template', 'version': 1, 'config': config}
+
+    def template_config(self, value):
+        if not isinstance(value, dict) or set(value) != {'format', 'version', 'config'}:
+            raise Invalid('Provide a Device template file.')
+        if value['format'] != 'ha-ai-studio-device-template' or type(value['version']) is not int or value['version'] != 1:
+            raise Invalid('Unsupported Device template format or version.')
+        # Validate the portable structure without requiring installation-specific Actions.
+        config = self.validate(value['config'], template=True)
+        if config['publish']:
+            raise Invalid('Device templates must have publication disabled.')
+        return config
+
+    def import_template(self, value):
+        if not isinstance(value, dict) or set(value) != {'template', 'name', 'actions'} or not name(value['name']):
+            raise Invalid('Provide a template, device name and Action assignments.')
+        config = self.template_config(value['template'])
+        entries = [entry for entry in config['sensors'] + config['functions'] if 'rate' not in entry]
+        slots = {entry['action_id'] for entry in entries}
+        assignments = value['actions']
+        if not isinstance(assignments, dict) or set(assignments) != slots or any(not isinstance(v, str) for v in assignments.values()):
+            raise Invalid('Assign an existing Action to every template Action slot.')
+        for entry in entries:entry['action_id'] = assignments[entry['action_id']]
+        config['name'] = value['name'].strip()
+        config['publish'] = False
+        return self.create_config(self.validate(config))
+
+    def validate(self, config, *, template=False):
         config = copy.deepcopy(config)
         if isinstance(config, dict):config.setdefault('functions', [])
         if not isinstance(config, dict) or set(config) != {'name', 'interval_minutes', 'publish', 'sensors', 'functions'}:
@@ -164,6 +208,9 @@ class Devices:
                 if sensor['action_id'] != '' or sensor['reading'] != '' or sensor['cumulative']:
                     raise Invalid('Rate sensors cannot have an Action reading or be cumulative counters.')
                 continue
+            if template:
+                if not identifier(sensor['action_id']):raise Invalid('Invalid template Action slot.')
+                continue
             action = self.studio.get(sensor['action_id'])
             if not action.supported:
                 raise Invalid('Select a supported action.')
@@ -182,6 +229,10 @@ class Devices:
             if not identifier(function['id']) or function['id'] in ids or not name(function['name']):
                 raise Invalid('Function IDs must be unique lowercase names; provide a function name.')
             ids.add(function['id'])
+            if template:
+                if not identifier(function['action_id']) or function['function'] != 'execute':
+                    raise Invalid('Invalid template function or Action slot.')
+                continue
             action = self.studio.get(function['action_id'])
             from .plugins import device_functions
             if not action.supported or function['function'] != 'execute' or 'execute' not in device_functions(action.plugin.metadata):

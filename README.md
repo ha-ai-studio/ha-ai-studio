@@ -2,6 +2,9 @@
 
 HA AI Studio runs configured Actions and uses them to update virtual Devices. Each Device can publish multiple named measurements to Home Assistant through MQTT Discovery and refresh them on an interval. Home Assistant retains long-term history and owns follow-up automations. No workflow chains or template mapping engine are included.
 
+Device configurations can be transferred as versioned JSON files: choose **Export template** in the Devices table, then **Import template** on the target installation. Exports use the saved draft and include sensor definitions (including derived rates), configured functions and the measurement interval. Each referenced Action becomes a portable slot; explicitly assign an existing compatible Action to each slot during import. Review reading IDs in the new Device before activation. Imports always create a new identity, remain inactive and disable Home Assistant publication. Action settings, broker credentials, assets, readings, request history and runtime state are excluded. Device and sensor labels are included. Version 1 accepts files up to 80 KB in the UI.
+
+
 ## Local development
 
 ```sh

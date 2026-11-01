@@ -200,7 +200,7 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
   await screen.findByText("Settings saved. Device is inactive.");
   await waitFor(() => expect(devices[0].enabled).toBe(false));
   await userEvent.click(screen.getByRole("button", { name: "← Devices" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Delete Water meter updated" }));
   await userEvent.click(
     within(screen.getByRole("dialog")).getByRole("button", {
       name: "Delete device",
