@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import uuid
 from collections import deque
 from contextlib import AsyncExitStack
@@ -57,8 +58,16 @@ class ActionService:
         self.type=definition.get('action_type')
         self.plugin=repositories.bound(definition['plugin']) if definition.get('plugin') and repositories else TYPES.get(self.type)
         self.supported=self.plugin is not None
-        self.environment=Environment(self.store,self.plugin) if definition.get('plugin') and self.plugin else None
-        if self.environment:self.environment.home_assistant=getattr(repositories,'home_assistant',None)
+        self.environment=Environment(self.store,self.plugin,definition.get("environment_state","environment.json")) if definition.get('plugin') and self.plugin else None
+        if self.environment:
+            self.environment.home_assistant=getattr(repositories,'home_assistant',None)
+            # The registry is the commit point. Unreferenced preparations are safe to
+            # remove after restart, whether shutdown preceded or followed the switch.
+            for path in (self.store.root/'environments').glob('*'):
+                if path.is_dir() and path!=self.environment.path:shutil.rmtree(path,ignore_errors=True)
+            for path in self.store.root.glob('environment-*.json'):
+                if path.name!=self.environment.state_file:path.unlink(missing_ok=True)
+        self.version_updating=False
         from .assets import ActionAssets
         self.assets=ActionAssets(self)
         self.device_configs=lambda: []
@@ -103,7 +112,7 @@ class ActionService:
     @property
     def enabled(self):return self.supported and self.config['enabled'] and bool(self.config['active']) and not self.deleted
     @property
-    def busy(self):return bool(self.environment and self.environment.task and not self.environment.task.done()) or self.lock.locked() or self.running or self.delivering or bool(self.job and not self.job.done())
+    def busy(self):return self.version_updating or bool(self.environment and self.environment.task and not self.environment.task.done()) or self.lock.locked() or self.running or self.delivering or bool(self.job and not self.job.done())
     def ensure_idle(self):
         if self.deleted:raise Invalid('Action has been deleted.')
         if self.busy:raise Invalid('Action is busy. Try again after the current operation.')
@@ -363,49 +372,82 @@ class Studio:
     def version_label(self,record):
         return record['manifest']['version']+' · '+(record.get('release',{}).get('tag') or record['commit'][:12])
     def version_guard(self,service):
-        service.ensure_idle()
+        if service.deleted:raise Invalid('Action has been deleted.')
         if not service.environment:raise Invalid('Only repository actions support version selection.')
-        if service.enabled:raise Invalid('Deactivate the action before changing its version.')
-        if self.devices.references(service.definition['id'],active_only=True):raise Invalid('Deactivate devices using this action before changing its version.')
+        if service.version_updating or (service.environment.task and not service.environment.task.done()):
+            raise Invalid('Action environment preparation is already running.')
+    async def validate_version(self,service,plugin):
+        configs=[service.config['draft'],service.config['active'],*self.devices.action_configs(service.definition['id'])]
+        for config in configs:
+            if config:await plugin.validate(config['settings'])
+        for item in self.devices.data['items'].values():
+            binding=item['bindings'].get(service.definition['id'])
+            if not binding:continue
+            _,error=await parse(json.dumps({'request_id':'device-validation','data':{}}),plugin)
+            if error:raise Invalid('Device actions must accept an empty input object.')
+            for function in (item['active'] or {}).get('functions',[]):
+                if function['action_id']==service.definition['id'] and function['function'] not in plugin.metadata.get('functions',[]):
+                    raise Invalid('The selected version does not support a configured Device function.')
     async def change_versions(self,targets):
-        # Call with broker and registry locks held. One registry write commits all bindings.
-        async with AsyncExitStack() as locks:
-            selected=[]
+        # Caller holds broker/registry locks, serializing configuration mutations.
+        # Execution keeps using the old environment throughout preparation.
+        prepared=[];committed=False;uncertain_commit=False
+        try:
             for target in targets:
                 if not isinstance(target,dict) or set(target)!={'id','snapshot','current'}:raise Invalid('Provide version targets from the preview.')
                 service=self.get(target['id']);self.version_guard(service)
                 if service.plugin.record['snapshot']!=target['current']:raise Invalid('Action version changed. Preview the update again.')
                 plugin=self.repositories.select(service.plugin.record,target['snapshot'])
-                await locks.enter_async_context(service.lock)
-                selected.append((service,plugin))
-            for service,plugin in selected:
-                await plugin.validate(service.config['draft']['settings'])
-            candidate=copy.deepcopy(self.registry)
-            for service,plugin in selected:
-                definition=next(d for d in candidate['agents'] if d['id']==service.definition['id'])
-                history=definition.setdefault('plugin_history',[])
-                if not any(r['snapshot']==service.plugin.record['snapshot'] for r in history):history.append(copy.deepcopy(service.plugin.record))
-                definition['plugin']=copy.deepcopy(plugin.record)
-            self.store.write('agents.json',candidate);self.registry=candidate
-            # Bind every instance before starting environments; a queue failure cannot leave
-            # the in-memory registry disagreeing with its durable batch commit.
-            for service,plugin in selected:
-                service.definition=copy.deepcopy(next(d for d in candidate['agents'] if d['id']==service.definition['id']))
-                service.plugin=plugin;service.environment.plugin=plugin
-            errors=[]
-            for service,plugin in selected:
-                try:service.environment.start()
-                except Exception:errors.append(service.definition['id'])
-            return errors
+                await self.validate_version(service,plugin)
+                environment=Environment(service.store,plugin,'environment-'+uuid.uuid4().hex+'.json')
+                environment.home_assistant=self.home_assistant
+                prepared.append((service,plugin,environment,service.environment))
+                service.version_updating=True
+            for service,plugin,environment,old in prepared:
+                environment.start();await environment.task
+                if not environment.ready:raise Invalid('New environment setup failed. The current action version is unchanged.')
+            async with AsyncExitStack() as locks:
+                # Drain executions/delivery without disconnecting MQTT or resetting schedules.
+                for service,_,_,_ in sorted(prepared,key=lambda row:row[0].definition['id']):
+                    await locks.enter_async_context(service.lock)
+                candidate=copy.deepcopy(self.registry)
+                for service,plugin,environment,old in prepared:
+                    definition=next(d for d in candidate['agents'] if d['id']==service.definition['id'])
+                    history=definition.setdefault('plugin_history',[])
+                    if not any(r['snapshot']==service.plugin.record['snapshot'] for r in history):history.append(copy.deepcopy(service.plugin.record))
+                    compatible=definition.setdefault('compatible_device_snapshots',[])
+                    if service.plugin.record['snapshot'] not in compatible:compatible.append(service.plugin.record['snapshot'])
+                    definition['plugin']=copy.deepcopy(plugin.record)
+                    definition['environment_state']=environment.state_file
+                # Each prepared state is already durable. One write commits every binding.
+                try:self.store.write('agents.json',candidate)
+                except BaseException:
+                    # A directory fsync may fail after rename. Retain BOTH generations;
+                    # restart resolves the authoritative registry and prunes the orphan.
+                    uncertain_commit=True
+                    raise
+                self.registry=candidate
+                for service,plugin,environment,old in prepared:
+                    service.definition=copy.deepcopy(next(d for d in candidate['agents'] if d['id']==service.definition['id']))
+                    service.plugin=plugin;service.environment=environment
+                committed=True
+            return []
+        finally:
+            for service,plugin,environment,old in prepared:
+                service.version_updating=False
+                if uncertain_commit:continue
+                discarded=old if committed else environment
+                await discarded.close()
+                await asyncio.to_thread(shutil.rmtree,discarded.path,True)
+                try:(service.store.root/discarded.state_file).unlink(missing_ok=True)
+                except OSError:pass  # Startup retries orphan cleanup.
     async def change_version(self,id,value):
         if not isinstance(value,dict) or set(value)!={'snapshot'}:raise Invalid('Select a downloaded action version.')
         async with self.brokers.lock,self.lock:
             service=self.get(id);self.version_guard(service)
             if value['snapshot']==service.plugin.record['snapshot']:return service.status()
-            errors=await self.change_versions([{'id':id,'snapshot':value['snapshot'],'current':service.plugin.record['snapshot']}])
-            result=service.status()
-            if errors:result['issues'].append('Version saved, but environment setup could not start. Rebuild the environment before use.')
-            return result
+            await self.change_versions([{'id':id,'snapshot':value['snapshot'],'current':service.plugin.record['snapshot']}])
+            return service.status()
     async def repository_actions(self,value,apply=False):
         expected={'id','targets'} if apply else {'id'}
         if not isinstance(value,dict) or set(value)!=expected or not isinstance(value['id'],str):raise Invalid('Provide repository ID and update targets.')
@@ -432,7 +474,7 @@ class Studio:
                         if plugin is None:raise Invalid('Action type is missing from this repository version.')
                         async with service.lock:
                             selected=self.repositories.bound(plugin)
-                            await selected.validate(service.config['draft']['settings'])
+                            await self.validate_version(service,selected)
                     except Invalid as exc:reason=str(exc)
                 entries.append({'id':service.definition['id'],'name':service.config['draft']['name'],'current':current,'snapshot':target,'reason':reason,'current_label':self.version_label(service.plugin.record),'target_label':self.version_label(plugin) if plugin else 'Unavailable'})
             return {'actions':entries,'environment_errors':[]}

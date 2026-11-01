@@ -1,5 +1,7 @@
 """Real MQTT checks on two isolated brokers. No personal credentials or HA access."""
 import asyncio
+import copy
+import shutil
 import json
 import tempfile
 import threading
@@ -101,6 +103,33 @@ async def main():
         await send(a_client,'echo/request',{'request_id':'git-5','data':{'x':[1,True]}});assert (await response('git-5'))['status']=='success'
         await send(a_client,'echo/request',{'request_id':'git-5','data':False});assert (await response('git-5'))['error']['code']=='request_id_conflict'
         await send(a_client,'echo/request',{'request_id':'git-retained','data':0},True);await asyncio.sleep(.2);assert 'git-retained' not in dynamic.jobs
+        await idle(dynamic)
+        # A live MQTT subscription must keep serving the old version while a separate
+        # venv is prepared, then serve the new version without reconnecting.
+        from app.plugins import Environment
+        upgraded=studio.repositories.store.root/'sources'/'synthetic-v2'
+        shutil.copytree(dest.parent.parent,upgraded)
+        (upgraded/'actions/sample/action.py').write_text('async def execute(data, settings):\n return {"version":2,"value":data}\n')
+        newer=copy.deepcopy(record);newer.update(snapshot='synthetic-v2',commit='b'*40)
+        newer['manifest']['version']='2'
+        catalog['repositories'][0]['versions']=[{'snapshot':'synthetic-v2','commit':'b'*40,'actions':[newer]}]
+        studio.repositories.store.write('catalog.json',catalog)
+        current_client=dynamic.mqtt;old_path=dynamic.environment.path
+        started=asyncio.Event();release=asyncio.Event();install=Environment.install
+        async def prepare(environment):
+            started.set();await release.wait();await install(environment)
+        with patch.object(Environment,'install',prepare):
+            update=asyncio.create_task(studio.change_version('dynamic',{'snapshot':'synthetic-v2'}))
+            await asyncio.wait_for(started.wait(),5)
+            await send(a_client,'echo/request',{'request_id':'during-update','data':42})
+            assert (await response('during-update'))['data']==42
+            release.set();await asyncio.wait_for(update,60)
+        assert dynamic.enabled and dynamic.mqtt is current_client
+        assert not old_path.exists()
+        await send(a_client,'echo/request',{'request_id':'after-update','data':42})
+        assert (await response('after-update'))['data']=={'version':2,'value':42}
+        await send(a_client,'echo/request',{'request_id':'during-update','data':42})
+        assert (await response('during-update'))['data']==42
         await idle(dynamic);await studio.close();studio=Studio(root);dynamic=studio.get('dynamic')
         # Widen the startup window that used to let the test and run() connect
         # the same MQTT client ID concurrently. Only the background task may connect.
@@ -121,7 +150,7 @@ async def main():
         before=len(seen);await observe('broker');await observe('broker2');await asyncio.sleep(.3)
         assert not any(topic=='echo/result' for _,topic,_,_ in seen[before:]),'Results must not be retained'
     for client in clients:client.disconnect();await asyncio.to_thread(client.loop_stop)
-    print('PASS: Git action venv + async runner across brokers, restart, deduplication/conflict and retained rejection; Echo across brokers A/B; all JSON types; duplicate/conflict; invalid JSON; retained rejection; restart; delivery failure/retry; draft test isolation; deactivate/reactivate/delete; no internal workflow topics or retained results.')
+    print('PASS: live MQTT hot version update without reconnect; old/new execution and cached results; Git action venv + async runner across brokers, restart, deduplication/conflict and retained rejection; Echo across brokers A/B; all JSON types; duplicate/conflict; invalid JSON; retained rejection; restart; delivery failure/retry; draft test isolation; deactivate/reactivate/delete; no internal workflow topics or retained results.')
 
 from app.action_types import TYPES
 # Exercise historical instances without exposing the compatibility type in production.

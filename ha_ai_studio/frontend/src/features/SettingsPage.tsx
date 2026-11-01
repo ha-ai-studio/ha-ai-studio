@@ -335,7 +335,9 @@ export function SettingsPage() {
                           : "Update available"}
                       </span>
                     )}
-                    {repo.check_error && <span role="status">{repo.check_error}</span>}
+                    {repo.check_error && (
+                      <span role="status">{repo.check_error}</span>
+                    )}
                   </div>
                   {repo.checked && (
                     <div className="small muted">
@@ -554,7 +556,7 @@ export function SettingsPage() {
                     setMessage(
                       result.environment_errors.length
                         ? "Versions saved. Some environments could not start; rebuild them before use."
-                        : "Action versions saved. Preparing Python environments. Actions remain inactive.",
+                        : "Action versions updated. Python environments are ready.",
                     );
                   })
                 }

@@ -399,7 +399,7 @@ class Devices:
                 try:
                     self.log(id, 'Waiting for action ' + action_id + '.')
                     action = self.studio.get(action_id)
-                    if action.environment and action.plugin.record != binding['plugin']:
+                    if action.environment and action.plugin.record != binding['plugin'] and (binding['plugin'] or {}).get('snapshot') not in action.definition.get('compatible_device_snapshots',[]):
                         raise Invalid('Action source changed. Reactivate the device.')
                     data = {}
                     # Meter actions accept prior readings for their own rate/confirmation checks.

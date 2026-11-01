@@ -29,7 +29,7 @@ Historical files and snapshots referenced by deleted actions remain preserved.
 Settings → Action repositories accepts public HTTPS Git repositories and a branch,
 tag or commit. Refresh reads metadata only. Existing instances stay pinned to their
 original commit; refreshing changes the catalog for newly created instances only.
-Private Git credentials and in-place Git version upgrades are not yet supported. Local development sources support explicit reload as described below.
+Private Git credentials are not supported. Downloaded Git/release versions can be selected on an Action, including while it is active. Local development sources support explicit inactive reload as described below.
 
 Repository layout:
 
@@ -132,8 +132,13 @@ corruption, not an untrusted publisher. Only install trusted repositories.
 Studio does not run npm or build scripts. It stores the resolved release tag, ID
 and package SHA256 in each immutable binding. Refresh changes only the creation
 catalog; existing Actions keep their version and snapshots across refresh and
-restart. There is no automatic conversion of existing Git/local sources or in-place
-release upgrade. Failed refreshes preserve the previous catalog. GitHub network
+restart. There is no automatic conversion of existing Git/local sources. Explicit
+version updates prepare and verify a separate venv while the current Action continues
+running, then wait for current executions and delivery before switching the durable
+binding. Failed preparation preserves the current environment. Old venvs are removed
+after the switch; source snapshots and request history remain available. Compatible
+Device bindings follow the update without reactivation or schedule changes. Failed
+refreshes preserve the previous catalog. GitHub network
 access and unauthenticated API rate limits apply; private releases are unsupported.
 
 ## Plugin Device templates

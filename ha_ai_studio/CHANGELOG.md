@@ -1,3 +1,11 @@
+## 0.0.22
+
+- Apply selected Action versions through Save and activate saved configurations automatically; remove the separate Active checkbox and Apply version button.
+- Prepare and verify a new Python environment while the current Action continues running, then wait for running executions and delivery before switching versions and removing the old environment.
+- Preserve MQTT subscriptions, cached results, Device identities and measurement schedules during compatible version updates, without requiring Action or Device deactivation.
+- Keep the current environment usable when preparation fails or is cancelled, and preserve restart recovery across interrupted registry writes.
+- Add regression coverage for Save, active version updates, Device functions, environment cleanup and live MQTT continuity.
+
 ## 0.0.21
 
 - Highlight available repository updates with a visible, non-interactive pill showing the release version when known.

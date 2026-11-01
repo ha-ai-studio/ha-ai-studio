@@ -488,9 +488,9 @@ class Repositories:
         await asyncio.gather(*self.tasks.values(),return_exceptions=True)
 
 class Environment:
-    def __init__(self,store,plugin):
-        self.store=store;self.plugin=plugin;self.task=None
-        self.state=store.read('environment.json',{'status':'Not installed','logs':[]})
+    def __init__(self,store,plugin,state_file="environment.json"):
+        self.store=store;self.plugin=plugin;self.task=None;self.state_file=state_file
+        self.state=store.read(state_file,{'status':'Not installed','logs':[]})
         if self.state['status'] in ('Queued','Installing','Verifying'):
             self.set('Failed','Installation interrupted. Rebuild the environment.')
         if self.state['status']=='Ready' and not self.ready:
@@ -509,7 +509,7 @@ class Environment:
     def path(self):return self.store.root/'environments'/self.state.get('generation','missing')
     def set(self,status,message,**fields):
         value={**self.state,**fields,'status':status,'logs':(self.state.get('logs',[])+[message])[-30:]}
-        self.store.write('environment.json',value);self.state=value
+        self.store.write(self.state_file,value);self.state=value
     def require(self):
         if not self.ready:raise Invalid('Action environment is not ready. Install or rebuild it first.')
     def start(self):
@@ -518,11 +518,7 @@ class Environment:
         self.task=asyncio.create_task(self.install())
     async def install(self):
         generation=uuid.uuid4().hex;path=self.store.root/'environments'/generation
-        # Inactive instances cannot execute during rebuild; discard obsolete generations.
-        previous=self.store.root/'environments'
-        if previous.exists():
-            for old in previous.iterdir():
-                if old.is_dir():await asyncio.to_thread(shutil.rmtree,old,True)
+        previous=self.path
         try:
             self.set('Installing','Creating isolated Python environment.',generation=generation)
             path.parent.mkdir(exist_ok=True);path.mkdir()
@@ -541,6 +537,7 @@ class Environment:
             response=await process([path/'bin/python','-I',RUNNER,source,self.plugin.manifest['entrypoint']],cwd=source,payload=json.dumps({'mode':'check','capabilities':self.plugin.manifest.get('capabilities',[])}).encode(),capture=True,timeout=30,venv=path)
             if json.loads(response)!={'ready':True}:raise Invalid('Invalid runner response.')
             self.set('Ready','Environment is ready.',python=sys.version,commit=self.plugin.record['commit'])
+            if previous!=path:await asyncio.to_thread(shutil.rmtree,previous,True)
         except asyncio.CancelledError:
             shutil.rmtree(path,ignore_errors=True)
             self.set('Failed','Installation interrupted. Rebuild the environment.');raise

@@ -1,13 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Button,
-  Card,
-  Checkbox,
-  Input,
-  IconButton,
-  Notice,
-  Select,
-} from "../design-system";
+import { Button, Card, Input, Notice, Select } from "../design-system";
 import { api, errorText } from "../lib/api";
 import { useOperation, usePoll } from "../lib/hooks";
 import type {
@@ -72,7 +64,6 @@ export function ActionEditor({
   const [draft, setDraft] = useState<Configuration>();
   const [staleVersion, setStaleVersion] = useState(false);
   const [selectedVersion, setSelectedVersion] = useState("");
-  const [enabled, setEnabled] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loadingError, setLoadingError] = useState("");
   const [values, setValues] = useState<Record<string, string | boolean>>({});
@@ -89,10 +80,12 @@ export function ActionEditor({
   const [message, setMessage] = useState("");
   const op = useOperation();
   const version = useRef(0);
+  const versionChanged =
+    !!selectedVersion && selectedVersion !== state?.plugin?.snapshot;
   useEffect(() => {
-    onDirty(dirty);
+    onDirty(dirty || versionChanged);
     return () => onDirty(false);
-  }, [dirty, onDirty]);
+  }, [dirty, versionChanged, onDirty]);
   useEffect(() => {
     onBusy(op.busy || editorBusy);
     return () => onBusy(false);
@@ -109,7 +102,6 @@ export function ActionEditor({
     legacyRead.current = null;
     setLegacyReady(false);
     setDraft(structuredClone(value.config.draft));
-    setEnabled(value.enabled);
     setValues({});
     setRaw(JSON.stringify(value.config.draft.settings, null, 2));
     setDirty(false);
@@ -146,7 +138,7 @@ export function ActionEditor({
       generation === version.current &&
       value.plugin?.snapshot !== state?.plugin?.snapshot
     ) {
-      if (dirty || editorBusy) setStaleVersion(true);
+      if (dirty || versionChanged || editorBusy) setStaleVersion(true);
       else load(value);
       return;
     }
@@ -263,7 +255,6 @@ export function ActionEditor({
                     version.current++;
                     void op.run(async () => {
                       setState(await api("deactivate", {}, id));
-                      setEnabled(false);
                     });
                   }}
                 >
@@ -305,7 +296,6 @@ export function ActionEditor({
                 void op.run(async () => {
                   const value = await api("deactivate", {}, id);
                   setState(value);
-                  setEnabled(false);
                   setMessage("Action deactivated.");
                 });
               }}
@@ -384,9 +374,11 @@ export function ActionEditor({
       <p role="status">
         {!state.supported
           ? "Unsupported legacy action · Disabled"
-          : dirty
-            ? "Unsaved changes"
-            : message}
+          : op.busy && versionChanged
+            ? "Preparing the new version. The current version remains available."
+            : dirty || versionChanged
+              ? "Unsaved changes"
+              : message}
       </p>
       <Notice error>
         {op.error || loadingError || pollError || state.issues.join(" ")}
@@ -411,18 +403,41 @@ export function ActionEditor({
             e.preventDefault();
             version.current++;
             void op.run(async () => {
-              const value = await api(
-                "action",
-                {
-                  config: configuration(),
-                  enabled,
-                  snapshot: state.plugin?.snapshot,
-                },
-                id,
-              );
+              let value = state;
+              if (!versionChanged || dirty) {
+                value = await api(
+                  "action",
+                  {
+                    config: configuration(),
+                    enabled: true,
+                    snapshot: state.plugin?.snapshot,
+                  },
+                  id,
+                );
+              }
+              if (versionChanged) {
+                value = await api(
+                  "action-version",
+                  { snapshot: selectedVersion },
+                  id,
+                );
+              }
+              if (versionChanged && !value.enabled) {
+                value = await api(
+                  "action",
+                  {
+                    config: value.config!.draft,
+                    enabled: true,
+                    snapshot: value.plugin?.snapshot,
+                  },
+                  id,
+                );
+              }
               load(value);
               setMessage(
-                enabled ? "Action saved. Active." : "Action saved. Inactive.",
+                versionChanged
+                  ? "Action version updated. Python environment is ready."
+                  : "Action saved. Active.",
               );
             });
           }}
@@ -444,13 +459,7 @@ export function ActionEditor({
                   <Select
                     label="Version"
                     value={selectedVersion}
-                    disabled={
-                      op.busy ||
-                      state.busy ||
-                      state.enabled ||
-                      dirty ||
-                      editorBusy
-                    }
+                    disabled={op.busy || dirty || editorBusy}
                     onChange={(e) => setSelectedVersion(e.target.value)}
                   >
                     {(state.versions || []).map((item) => (
@@ -464,9 +473,9 @@ export function ActionEditor({
                     ))}
                   </Select>
                   <p className="small muted">
-                    Select a downloaded version to upgrade or downgrade. Save or
-                    discard settings first. The action and devices using it must
-                    be inactive.
+                    Select a downloaded version and click Save. Save or discard
+                    settings first. The current version keeps running until the
+                    new environment is ready.
                   </p>
                   <div className="action-version-controls">
                     {state.versions?.find(
@@ -484,51 +493,9 @@ export function ActionEditor({
                         View release or commit
                       </a>
                     )}
-                    <IconButton
-                      icon="apply"
-                      label="Apply version"
-                      title="Apply the selected action version"
-                      disabled={
-                        !selectedVersion ||
-                        selectedVersion === state.plugin.snapshot ||
-                        op.busy ||
-                        state.busy ||
-                        state.enabled ||
-                        dirty ||
-                        editorBusy
-                      }
-                      onClick={() => {
-                        version.current++;
-                        void op.run(async () => {
-                          load(
-                            await api(
-                              "action-version",
-                              { snapshot: selectedVersion },
-                              id,
-                            ),
-                          );
-                          setMessage(
-                            "Version saved. Preparing the Python environment.",
-                          );
-                        });
-                      }}
-                    />
                   </div>
                 </>
               )}
-              <Checkbox
-                label="Active"
-                checked={enabled}
-                disabled={
-                  !!state.plugin?.dynamic &&
-                  state.environment.status !== "Ready" &&
-                  !state.enabled
-                }
-                onChange={(e) => {
-                  setEnabled(e.target.checked);
-                  changed();
-                }}
-              />
             </Card>
             <Card title="Input">
               <BrokerSelect

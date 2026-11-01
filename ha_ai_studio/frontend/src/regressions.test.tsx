@@ -97,6 +97,13 @@ function mockApi(value = action()) {
           delivery: "not_sent",
           result: { data: JSON.parse(body.payload).data },
         };
+      if (path.endsWith("/action-version") && body) {
+        const selected = value.versions!.find(
+          (item) => item.snapshot === body.snapshot,
+        )!;
+        value.plugin!.snapshot = selected.snapshot;
+        value.plugin!.version = selected.version;
+      }
       if (path.endsWith("/deactivate")) value.enabled = false;
       if (path.endsWith("/action") && body) {
         value.config = {
@@ -285,15 +292,16 @@ it("create, edit, dirty guard, activate, deactivate and delete use the real Reac
   );
   await userEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(name).toHaveValue("Updated action");
-  await userEvent.click(screen.getByRole("checkbox", { name: "Active" }));
+  expect(
+    screen.queryByRole("checkbox", { name: "Active" }),
+  ).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await screen.findByText("Action saved. Active.");
   expect(
     mock.calls.find((c) => c.path.endsWith("/action") && c.body)?.body,
   ).toMatchObject({ enabled: true, config: { name: "Updated action" } });
-  await userEvent.click(screen.getByRole("checkbox", { name: "Active" }));
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await screen.findByText("Action saved. Inactive.");
+  await userEvent.click(screen.getByRole("button", { name: "Deactivate" }));
+  await screen.findByText("Action deactivated.");
   await userEvent.click(screen.getByRole("button", { name: "← Actions" }));
   await userEvent.click(
     await screen.findByRole("button", { name: "Delete Fixture" }),
@@ -489,7 +497,7 @@ describe("Action version selection", () => {
     ];
     return value;
   }
-  it("selects a downgrade in General and applies its immutable snapshot", async () => {
+  it("saves a downgrade without a separate Apply version button", async () => {
     const value = versioned();
     const fixture = mockApi(value);
     render(
@@ -506,9 +514,10 @@ describe("Action version selection", () => {
     expect(
       screen.getByRole("link", { name: "View release or commit" }),
     ).toHaveAttribute("href", value.versions![0].url);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Apply version" }),
-    );
+    expect(
+      screen.queryByRole("button", { name: "Apply version" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(
         fixture.calls.some(
@@ -518,6 +527,75 @@ describe("Action version selection", () => {
         ),
       ).toBe(true),
     );
+  });
+  it("saves a selected upgrade and preserves it on subsequent settings saves", async () => {
+    const value = versioned();
+    value.plugin!.snapshot = "old";
+    value.plugin!.version = "1";
+    const fixture = mockApi(value);
+    const onDirty = vi.fn();
+    render(
+      <ActionEditor
+        id="fixture"
+        back={() => {}}
+        onDirty={onDirty}
+        onBusy={() => {}}
+      />,
+    );
+    const select = await screen.findByRole("combobox", { name: "Version" });
+    await userEvent.selectOptions(select, "new");
+    expect(onDirty).toHaveBeenLastCalledWith(true);
+    expect(
+      screen.queryByRole("checkbox", { name: "Active" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(
+      "Action version updated. Python environment is ready.",
+    );
+    expect(select).toHaveValue("new");
+    expect(value.plugin!.snapshot).toBe("new");
+    expect(value.enabled).toBe(true);
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Name" }),
+      " edited",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Action saved. Active.");
+    expect(select).toHaveValue("new");
+    expect(
+      fixture.calls.filter((c) => c.path.endsWith("/action-version")),
+    ).toHaveLength(1);
+    expect(
+      fixture.calls.filter((c) => c.path.endsWith("/action") && c.body).at(-1)!
+        .body,
+    ).toMatchObject({ snapshot: "new" });
+  });
+  it("updates an active, executing Action without saving or disabling it", async () => {
+    const value = versioned();
+    value.enabled = true;
+    value.busy = true;
+    const fixture = mockApi(value);
+    render(
+      <ActionEditor
+        id="fixture"
+        back={() => {}}
+        onDirty={() => {}}
+        onBusy={() => {}}
+      />,
+    );
+    await userEvent.selectOptions(
+      await screen.findByRole("combobox", { name: "Version" }),
+      "old",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(
+      "Action version updated. Python environment is ready.",
+    );
+    expect(value.enabled).toBe(true);
+    expect(value.plugin!.snapshot).toBe("old");
+    expect(
+      fixture.calls.filter((c) => c.path.endsWith("/action") && c.body),
+    ).toHaveLength(0);
   });
   it("prevents version changes while settings have unsaved changes", async () => {
     mockApi(versioned());
@@ -537,8 +615,8 @@ describe("Action version selection", () => {
     );
     expect(select).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "Apply version" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "Apply version" }),
+    ).not.toBeInTheDocument();
   });
 });
 

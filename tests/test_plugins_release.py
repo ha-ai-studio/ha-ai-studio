@@ -1,5 +1,6 @@
 """Synthetic release packages; no GitHub, MQTT or production state access."""
 import copy
+import asyncio
 import hashlib
 import io
 import json
@@ -174,11 +175,8 @@ class VersionManagement(Releases):
         self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
         second=self.studio.get('second');second.config['active']=copy.deepcopy(second.config['draft']);second.config['enabled']=True
         preview=await self.studio.repository_actions({'id':self.ident})
-        self.assertIn('Deactivate',preview['actions'][1]['reason'])
+        self.assertIsNone(preview['actions'][1]['reason'])
         targets=[{k:item[k] for k in ('id','snapshot','current')} for item in preview['actions']]
-        with self.assertRaises(Invalid):await self.studio.repository_actions({'id':self.ident,'targets':targets},apply=True)
-        self.assertEqual(self.studio.get('first').plugin.record['snapshot'],old)
-        second.config['enabled']=False
         with patch.object(self.studio.store,'write',side_effect=OSError('synthetic')):
             with self.assertRaises(OSError):await self.studio.repository_actions({'id':self.ident,'targets':targets},apply=True)
         self.assertEqual(self.studio.get('first').plugin.record['snapshot'],old)
@@ -197,24 +195,24 @@ class VersionManagement(Releases):
         self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
         target=next(iter(repos.types().values())).record['snapshot']
         with self.assertRaises(Invalid):await self.studio.change_version('sample',{'snapshot':'unknown'})
-        with patch.object(self.studio.devices,'references',return_value=True):
-            with self.assertRaisesRegex(Invalid,'Deactivate devices'):await self.studio.change_version('sample',{'snapshot':target})
         with self.assertRaisesRegex(Invalid,'version changed'):await service.save(service.config['draft'],False,set_enabled=False,expected_snapshot=target)
-        async with service.lock:
-            with self.assertRaisesRegex(Invalid,'busy'):await self.studio.change_version('sample',{'snapshot':target})
         with patch.object(GitPlugin,'validate',side_effect=Invalid('Settings incompatible')):
             with self.assertRaisesRegex(Invalid,'Settings'):await self.studio.change_version('sample',{'snapshot':target})
         with patch.object(self.studio.store,'write',side_effect=OSError('synthetic')):
             with self.assertRaises(OSError):await self.studio.change_version('sample',{'snapshot':target})
         self.assertEqual(service.plugin.record,old);self.assertTrue(service.environment.ready)
-        with patch.object(service.environment,'start',side_effect=OSError('synthetic')):
-            result=await self.studio.change_version('sample',{'snapshot':target})
-            self.assertEqual(result['plugin']['snapshot'],target)
-            self.assertEqual(result['environment']['status'],'Failed')
-        self.assertFalse(service.environment.ready)
-        with self.assertRaises(Invalid):await service.execute(None,{})
+        from app.plugins import Environment
+        with patch.object(Environment,'start',side_effect=OSError('synthetic')):
+            with self.assertRaises(OSError):await self.studio.change_version('sample',{'snapshot':target})
+        self.assertTrue(service.environment.ready)
+        self.assertEqual(await service.execute(None,{}),'1')
+        async def failed(environment):environment.set('Failed','Synthetic install failure.')
+        with patch.object(Environment,'install',failed):
+            with self.assertRaisesRegex(Invalid,'unchanged'):await self.studio.change_version('sample',{'snapshot':target})
+        self.assertEqual(service.plugin.record,old)
+        self.assertEqual(await service.execute(None,{}),'1')
 
-    async def test_function_only_device_guards_versions_and_rebinds_on_activation(self):
+    async def test_active_function_device_follows_upgrade_without_reactivation(self):
         repos=await self.seed();kind=next(iter(repos.types()))
         await self.studio.create({'id':'sample','name':'Sample','type':kind})
         service=self.studio.get('sample');await service.environment.task
@@ -224,18 +222,87 @@ class VersionManagement(Releases):
         await self.studio.devices.save(device['id'],{'config':config,'enabled':True})
         self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
         target=repos.state['repositories'][0]['actions'][0]['snapshot']
-        with self.assertRaisesRegex(Invalid,'Deactivate devices'):
-            await self.studio.change_version('sample',{'snapshot':target})
         preview=await self.studio.repository_actions({'id':self.ident})
-        self.assertIn('Deactivate devices',preview['actions'][0]['reason'])
+        self.assertIsNone(preview['actions'][0]['reason'])
         self.assertEqual(service.plugin.record['snapshot'],original)
-        self.studio.devices.deactivate(device['id'])
+        before=copy.deepcopy(self.studio.devices.get(device['id']))
         await self.studio.change_version('sample',{'snapshot':target});await service.environment.task
         self.assertEqual(self.studio.devices.get(device['id'])['bindings']['sample']['plugin']['snapshot'],original)
-        await self.studio.devices.save(device['id'],{'config':config,'enabled':True})
-        self.assertEqual(self.studio.devices.get(device['id'])['identity'],device['identity'])
-        self.assertEqual(self.studio.devices.get(device['id'])['bindings']['sample']['plugin']['snapshot'],target)
+        self.assertEqual(self.studio.devices.get(device['id']),before)
         self.studio.devices.invoke_function(device['id'],{'function_id':'execute','request_id':'after-upgrade'})
         await self.studio.devices.tasks[device['id']]
         self.assertEqual(self.studio.devices.get(device['id'])['status'],'ready')
         self.assertEqual(list(service.jobs.values())[-1]['result']['data'],'2')
+
+    async def test_hot_switch_prepares_alongside_execution_drains_and_removes_old_venv(self):
+        from app.plugins import Environment
+        repos=await self.seed();kind=next(iter(repos.types()))
+        await self.studio.create({'id':'sample','name':'Sample','type':kind})
+        service=self.studio.get('sample');await service.environment.task
+        old_path=service.environment.path
+        service.config.update(active=copy.deepcopy(service.config['draft']),enabled=True)
+        service.store.write('action-config.json',service.config)
+        service.mqtt=object();connection=service.mqtt
+        self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
+        target=next(iter(repos.types().values())).record['snapshot']
+        started=asyncio.Event();release=asyncio.Event();ready=asyncio.Event()
+        install=Environment.install
+        async def prepare(environment):
+            started.set();await release.wait();await install(environment);ready.set()
+        with patch.object(Environment,'install',prepare):
+            task=asyncio.create_task(self.studio.change_version('sample',{'snapshot':target}))
+            await asyncio.wait_for(started.wait(),5)
+            self.assertEqual((await service.internal_request('during-build',{},service.config['active']))['data'],'1')
+            async with service.lock:
+                release.set();await asyncio.wait_for(ready.wait(),30)
+                self.assertFalse(task.done());self.assertTrue(old_path.is_dir())
+                self.assertEqual(service.plugin.manifest['version'],'1')
+            await asyncio.wait_for(task,10)
+        self.assertTrue(service.enabled);self.assertIs(service.mqtt,connection)
+        self.assertFalse(old_path.exists());self.assertEqual(len(list(old_path.parent.iterdir())),1)
+        self.assertEqual((await service.internal_request('after-build',{},service.config['active']))['data'],'2')
+        self.assertEqual((await service.internal_request('during-build',{},service.config['active']))['data'],'1')
+        service.mqtt=None
+        restored=Studio(self.root/'data')
+        try:
+            self.assertTrue(restored.get('sample').enabled)
+            self.assertEqual(await restored.get('sample').execute({},{}),'2')
+        finally:await restored.close()
+
+    async def test_cancelled_preparation_retains_current_environment(self):
+        from app.plugins import Environment
+        repos=await self.seed();kind=next(iter(repos.types()))
+        await self.studio.create({'id':'sample','name':'Sample','type':kind})
+        service=self.studio.get('sample');await service.environment.task
+        old_path=service.environment.path
+        self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
+        target=next(iter(repos.types().values())).record['snapshot']
+        started=asyncio.Event()
+        async def prepare(environment):
+            started.set();await asyncio.Event().wait()
+        with patch.object(Environment,'install',prepare):
+            task=asyncio.create_task(self.studio.change_version('sample',{'snapshot':target}))
+            await asyncio.wait_for(started.wait(),5);task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await task
+        self.assertTrue(old_path.exists());self.assertFalse(service.version_updating)
+        self.assertEqual(await service.execute({},{}),'1')
+
+    async def test_registry_failure_after_replace_retains_restartable_generations(self):
+        repos=await self.seed();kind=next(iter(repos.types()))
+        await self.studio.create({'id':'sample','name':'Sample','type':kind})
+        service=self.studio.get('sample');await service.environment.task
+        self.version='2';repos.refresh(self.ident);await repos.tasks[self.ident]
+        target=next(iter(repos.types().values())).record['snapshot']
+        write=self.studio.store.write
+        def interrupted(name,value):
+            write(name,value)
+            raise OSError('Synthetic directory fsync failure after replacement')
+        with patch.object(self.studio.store,'write',side_effect=interrupted):
+            with self.assertRaises(OSError):await self.studio.change_version('sample',{'snapshot':target})
+        self.assertEqual(await service.execute({},{}),'1')
+        self.assertEqual(len(list((service.store.root/'environments').iterdir())),2)
+        restored=Studio(self.root/'data')
+        try:
+            self.assertEqual(await restored.get('sample').execute({},{}),'2')
+            self.assertEqual(len(list((service.store.root/'environments').iterdir())),1)
+        finally:await restored.close()
