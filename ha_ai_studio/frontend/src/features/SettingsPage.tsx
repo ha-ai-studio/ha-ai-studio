@@ -326,9 +326,17 @@ export function SettingsPage() {
                   {repo.release ? ` · ${repo.release.tag}` : ""}
                 </td>
                 <td>
-                  {repo.status}
-                  {repo.update_available ? " · Update available" : ""}
-                  {repo.check_error && <p role="status">{repo.check_error}</p>}
+                  <div className="repository-status">
+                    <span>{repo.status}</span>
+                    {repo.update_available && (
+                      <span className="repository-update-pill">
+                        {repo.available?.release?.tag
+                          ? `Update available · ${repo.available.release.tag}`
+                          : "Update available"}
+                      </span>
+                    )}
+                    {repo.check_error && <span role="status">{repo.check_error}</span>}
+                  </div>
                   {repo.checked && (
                     <div className="small muted">
                       Last checked: {new Date(repo.checked).toLocaleString()}

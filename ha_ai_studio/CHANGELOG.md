@@ -1,3 +1,9 @@
+## 0.0.21
+
+- Highlight available repository updates with a visible, non-interactive pill showing the release version when known.
+- Keep repository status and the update pill on one line, with the last check time below.
+- Preserve the separate download icon in the repository action controls; downloading does not change existing Action bindings.
+
 ## 0.0.20
 
 - Run Python tests in four independent CI jobs using the same verified image; keep MQTT, TLS and security checks parallel and require every group to pass.

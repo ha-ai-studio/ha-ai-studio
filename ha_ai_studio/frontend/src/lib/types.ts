@@ -96,6 +96,7 @@ export interface Discovery {
 }
 export interface Repository {
   update_available?: boolean;
+  available?: { commit: string; release?: { tag: string } | null } | null;
   checked?: string;
   check_error?: string | null;
   versions?: {

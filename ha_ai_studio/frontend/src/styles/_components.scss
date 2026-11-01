@@ -634,3 +634,20 @@ tr:last-child td {
   .entity-field-search { left: 6px; color: var(--accent); svg { width: 20px; height: 20px; } }
   .entity-field-clear { right: 6px; color: var(--text); font-size: 20px; }
 }
+
+.repository-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.repository-update-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
