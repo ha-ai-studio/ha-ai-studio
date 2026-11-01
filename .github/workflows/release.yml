@@ -58,8 +58,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Unit, API and package tests
-            command: ./scripts/test.sh --skip-build
+          - name: Assets, API and package tests
+            command: STUDIO_TEST_GROUP=core ./scripts/test.sh --skip-build
+          - name: Git plugin tests
+            command: STUDIO_TEST_GROUP=plugins ./scripts/test.sh --skip-build
+          - name: Plugin release tests
+            command: STUDIO_TEST_GROUP=releases ./scripts/test.sh --skip-build
+          - name: Local plugin tests
+            command: STUDIO_TEST_GROUP=local ./scripts/test.sh --skip-build
           - name: MQTT integration tests
             command: ./scripts/test-mqtt.sh
           - name: TLS and topic permissions

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from aiohttp.test_utils import TestClient,TestServer
 from app.actions import Studio
 from app.server import create_app
-from app.plugins import manifest
+from app.plugins import Environment, manifest
 from app.assets import image_info,preview
 from app.domain import Invalid
 
@@ -34,9 +34,12 @@ class AssetsTests(unittest.IsolatedAsyncioTestCase):
             ' return {"mode":context["mode"]}\n')
         record={'type':'git-assets-sample','repository_id':'assets','commit':'a'*40,'snapshot':'assets-test','directory':'actions/sample','manifest':await manifest(source)}
         self.studio.repositories.state={'repositories':[{'id':'assets','url':'https://example.invalid','ref':'main','status':'Ready','actions':[record],'logs':[]}]}
-        for name in ('first','second'):
-            await self.studio.create({'id':name,'name':name,'type':record['type']});await self.studio.get(name).environment.task
-            self.assertTrue(self.studio.get(name).environment.ready)
+        await self.studio.create({'id':'first','name':'first','type':record['type']})
+        await self.studio.get('first').environment.task
+        self.assertTrue(self.studio.get('first').environment.ready)
+        # The second instance only checks asset ownership; it never executes code.
+        with patch.object(Environment,'start'):
+            await self.studio.create({'id':'second','name':'second','type':record['type']})
         self.client=TestClient(TestServer(self.app));await self.client.start_server()
     async def asyncTearDown(self):
         await self.client.close();await self.studio.close();self.tmp.cleanup()
@@ -84,10 +87,6 @@ class AssetsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(service.environment,'preview',failure):
             with self.assertRaises(Invalid):await preview(service,{'data':{},'settings':{}})
         self.assertEqual(list((service.store.root/'previews').iterdir()),[]);self.assertEqual(service.jobs,{})
-    def test_image_header_pixel_limit(self):
-        import struct
-        huge=PNG[:16]+struct.pack('>II',8192,8192)+PNG[24:]
-        with self.assertRaises(Invalid):image_info(huge)
     async def test_cancelled_preview_and_protected_asset_deletion(self):
         service=self.studio.get('first')
         before=copy.deepcopy((service.config,service.jobs,service.last))
@@ -160,3 +159,10 @@ class AssetsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.assets.path(result['assets'][0]['id']).read_bytes(),PNG)
         with self.assertRaises(Invalid):self.studio.get('second').assets.path(result['assets'][0]['id'])
         self.assertEqual((service.config,service.jobs),before)
+
+
+class ImageHeaderTests(unittest.TestCase):
+    def test_image_header_pixel_limit(self):
+        import struct
+        huge=PNG[:16]+struct.pack('>II',8192,8192)+PNG[24:]
+        with self.assertRaises(Invalid):image_info(huge)
