@@ -156,25 +156,31 @@ class Devices:
         finally:self.editing.discard(id)
 
     async def _save(self, id, value):
-        if not isinstance(value, dict) or set(value) != {'config', 'activate'} or type(value['activate']) is not bool:
-            raise Invalid('Provide device configuration and activation.')
+        if not isinstance(value, dict) or set(value) not in ({'config', 'activate'}, {'config', 'enabled'}):
+            raise Invalid('Provide device configuration and its active state.')
+        apply_settings = 'enabled' in value
+        activate = value['enabled'] if apply_settings else value['activate']
+        if type(activate) is not bool:
+            raise Invalid('Provide device configuration and its active state.')
         async with self.studio.brokers.lock, AsyncExitStack() as locks:
             if self.busy(id):raise Invalid('Device is measuring. Wait for completion.')
             current = self.get(id)
             config = self.validate(value['config'])
             bindings = {}
             semantics_by_id = copy.deepcopy(current['sensor_identities'])
-            if value['activate']:
-                if not config['sensors']:raise Invalid('Add at least one sensor before activation.')
-                if config['publish'] and not self.studio.discovery.data['config']['enabled']:
+            if activate or apply_settings:
+                if activate and not config['sensors']:raise Invalid('Add at least one sensor before enabling the device.')
+                if config['publish'] and (activate or not current['active'] or not current['active']['publish']) and not self.studio.discovery.data['config']['enabled']:
                     raise Invalid('Enable central Home Assistant discovery in Settings before publishing devices.')
-                for action_id in sorted({s['action_id'] for s in config['sensors']}):
-                    await locks.enter_async_context(self.studio.get(action_id).lock)
+                if activate:
+                    for action_id in sorted({s['action_id'] for s in config['sensors']}):
+                        await locks.enter_async_context(self.studio.get(action_id).lock)
                 for sensor in config['sensors']:
                     old = semantics_by_id.get(sensor['id'])
                     semantics = [sensor['device_class'], sensor['unit'], sensor['cumulative']]
                     if old and old != semantics:raise Invalid('A sensor’s published metadata and counter behavior cannot change. Add a new sensor ID instead.')
-                    semantics_by_id[sensor['id']] = semantics
+                    if activate or config['publish']:semantics_by_id[sensor['id']] = semantics
+                    if not activate:continue
                     action = self.studio.get(sensor['action_id'])
                     if action.environment:action.environment.require()
                     action_config = await action.check_config(action.config['active'] if action.enabled else action.config['draft'])
@@ -187,9 +193,11 @@ class Devices:
             item = candidate['items'][id]
             item['draft'] = config
             item['sensor_identities'] = semantics_by_id
-            if value['activate']:
+            if activate:
                 item.update(active=copy.deepcopy(config), enabled=True, bindings=bindings,
                             status='ready', next_run=time.time() + config['interval_minutes'] * 60)
+            elif apply_settings:
+                item.update(active=copy.deepcopy(config), enabled=False, status='disabled', next_run=None)
             # Validate new discovery topics before committing device activation.
             previous = self.data
             self.data = candidate
@@ -263,12 +271,16 @@ class Devices:
                     for sensor in sensors:
                         try:
                             matches = [r for r in readings if isinstance(r, dict) and r.get('id') == sensor['reading']]
-                            if len(matches) != 1:raise Invalid('Named reading is missing or duplicated.')
+                            if not matches:
+                                message = output.get('message') if output.get('status') == 'unreadable' else None
+                                raise Invalid(message.strip() if isinstance(message, str) and message.strip() else 'Named reading is missing.')
+                            if len(matches) != 1:raise Invalid('Named reading is duplicated.')
                             reading = matches[0];value = reading.get('value')
                             numeric = type(value) in (int, float)
                             textual = isinstance(value, str)
                             if reading.get('status') != 'read' or not (numeric or textual):
-                                raise Invalid('Action did not return a valid number or text reading.')
+                                reason = reading.get('reason') or reading.get('message')
+                                raise Invalid(reason.strip() if isinstance(reason, str) and reason.strip() else 'Action did not return a valid number or text reading.')
                             if numeric and not math.isfinite(value):
                                 raise Invalid('Action returned a non-finite number.')
                             if textual and (not value.strip() or len(value) > 255):

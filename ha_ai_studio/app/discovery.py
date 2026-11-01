@@ -6,7 +6,7 @@ import json
 from .domain import Invalid
 from .mqtt import MQTT
 
-VERSION = '0.0.13'
+VERSION = '0.0.14'
 DEFAULT = {'enabled': False, 'broker_id': None, 'prefix': 'homeassistant', 'ha_status_topic': 'homeassistant/status'}
 
 
@@ -116,6 +116,10 @@ class Discovery:
                     device_class='timestamp', entity_category='diagnostic')] = value.get('timestamp', 'None')
                 result[entity('status_' + sensor['id'], sensor['name'] + ' status', entity_category='diagnostic')] = (
                     'disabled' if not item['enabled'] else value.get('status', 'waiting'))
+                # HA sensor states are limited to 255 characters; keep the full error in Studio.
+                message = value.get('error') or ('Reading successful.' if value.get('status') == 'ready' else 'No reading yet.')
+                result[entity('status_message_' + sensor['id'], sensor['name'] + ' Status Message',
+                    entity_category='diagnostic')] = message if len(message) <= 255 else message[:254] + '…'
         # This is a shared transport availability topic, not an advertised Studio device.
         result[availability] = 'online'
         return result

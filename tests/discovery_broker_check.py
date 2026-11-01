@@ -54,7 +54,7 @@ async def main():
         await until(lambda:any(h=='broker3' and t==availability and p==b'online' for h,t,p,r in seen))
         assert not any(h!='broker3' and (t.startswith('homeassistant/') or t==prefix+'/status') for h,t,p,r in seen)
         configs={t:json.loads(p) for h,t,p,r in seen if h=='broker3' and t.endswith('/config') and p}
-        assert len(configs)==7
+        assert len(configs)==9
         assert configs[status]['unique_id']==prefix+'_status'
         await until(lambda:service.mqtt and service.mqtt.ready.is_set())
         await publish(a,'discovery-check/request',json.dumps({'request_id':'production','data':{'private':'DO-NOT-ANNOUNCE'}}))
@@ -65,6 +65,16 @@ async def main():
             studio.devices.start_read(device['id']);await studio.devices.tasks[device['id']]
         await until(lambda:any(t==prefix+'/value_water' and p==b'123' for h,t,p,r in seen))
         await until(lambda:any(t==prefix+'/value_serial' and p==b'000123-AB' for h,t,p,r in seen))
+        await until(lambda:any(t==prefix+'/status_message_water' and p==b'Reading successful.' for h,t,p,r in seen))
+        reason = 'Alignment reference was not found confidently.'
+        with patch.object(service,'execute',AsyncMock(return_value={'status':'unreadable','message':reason,'readings':[]})):
+            studio.devices.start_read(device['id']);await studio.devices.tasks[device['id']]
+        for key in ('water', 'serial'):
+            await until(lambda:any(t==prefix+'/status_message_'+key and p==reason.encode() for h,t,p,r in seen))
+        recovery_start = len(seen)
+        with patch.object(service,'execute',AsyncMock(return_value={'readings':[reading(),reading('serial','000123-AB','')]})):
+            studio.devices.start_read(device['id']);await studio.devices.tasks[device['id']]
+        await until(lambda:any(t==prefix+'/status_message_water' and p==b'Reading successful.' for h,t,p,r in seen[recovery_start:]))
         serial_config=studio.discovery.desired()[f'homeassistant/sensor/{prefix}/value_serial/config']
         assert 'state_class' not in serial_config and 'unit_of_measurement' not in serial_config
         assert not any(b'DO-NOT-ANNOUNCE' in p for h,t,p,r in seen if h=='broker3')

@@ -184,9 +184,12 @@ export function DeviceEditor({
   const [actions, setActions] = useState<ActionState[]>([]);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [confirm, setConfirm] = useState(false);
+  const [enabled, setEnabled] = useState(false);
   const op = useOperation();
-  const dirty = !!item && JSON.stringify(config) !== JSON.stringify(item.draft);
+  const dirty =
+    !!item &&
+    (JSON.stringify(config) !== JSON.stringify(item.draft) ||
+      enabled !== item.enabled);
   useEffect(() => {
     onDirty(dirty);
   }, [dirty, onDirty]);
@@ -204,6 +207,7 @@ export function DeviceEditor({
         if (!c.signal.aborted) {
           setItem(device);
           setConfig(device.draft);
+          setEnabled(device.enabled);
           setActions(data.actions.filter((a) => a.supported));
         }
       })
@@ -217,6 +221,9 @@ export function DeviceEditor({
       try {
         const device = await api("device", undefined, id, signal);
         if (!signal.aborted) {
+          setEnabled((current) =>
+            current === item?.enabled ? device.enabled : current,
+          );
           setItem(device);
           setError("");
         }
@@ -224,7 +231,7 @@ export function DeviceEditor({
         if (!signal.aborted) setError(errorText(e));
       }
     },
-    !op.busy && !confirm,
+    !op.busy,
     item?.busy ? 500 : 2000,
   );
   if (!item || !config)
@@ -247,25 +254,25 @@ export function DeviceEditor({
         i === index ? { ...s, ...patch } : s,
       ),
     });
-  const save = (activate: boolean) =>
+  const save = () =>
     op.run(async () => {
-      const result = await api("device", { config, activate }, id);
+      const result = await api("device", { config, enabled }, id);
       setItem(result);
       setConfig(result.draft);
+      setEnabled(result.enabled);
       setMessage(
-        activate
-          ? "Device activated. The next measurement is scheduled."
-          : "Draft saved. Active measurements are unchanged.",
+        result.enabled
+          ? "Settings saved. Device is active; the next measurement is scheduled."
+          : "Settings saved. Device is inactive.",
       );
-      setConfirm(false);
     });
   return (
     <section className="device-editor">
+      <Button variant="text" onClick={back} disabled={op.busy}>
+        ← Devices
+      </Button>
       <div className="heading">
         <div>
-          <Button onClick={back} disabled={op.busy}>
-            ← Devices
-          </Button>
           <h1>{config.name}</h1>
           <p>
             Manage sensors, automatic readings and Home Assistant publication.
@@ -282,23 +289,13 @@ export function DeviceEditor({
           >
             Read now
           </Button>
-          <Button
-            disabled={locked || !item.enabled}
-            onClick={() =>
-              void op.run(async () => {
-                setItem(await api("device-deactivate", {}, id));
-              })
-            }
-          >
-            Deactivate
-          </Button>
         </div>
       </div>
       <Notice error>{error || op.error || item.issue}</Notice>
       <Notice>{message}</Notice>
       <Notice>
-        {pendingActivation
-          ? "This draft differs from the active device. Scheduled readings still use the active configuration. Activate to apply changes."
+        {dirty || (item.enabled && pendingActivation)
+          ? "Unsaved changes. Save to apply settings and the active state. Scheduled readings use the previously saved configuration."
           : null}
       </Notice>
       <Card title="Device status">
@@ -349,11 +346,22 @@ export function DeviceEditor({
         }}
         onSubmit={(e) => {
           e.preventDefault();
-          void save(false);
+          void save();
         }}
       >
         <fieldset disabled={locked}>
           <Card title="Device settings">
+            <Checkbox
+              label="Active"
+              checked={enabled}
+              onChange={(event) => {
+                setEnabled(event.target.checked);
+                setMessage("");
+              }}
+            />
+            <p className="small muted">
+              Enable automatic readings. Changes take effect when you save.
+            </p>
             <div className="device-field-grid">
               <Input
                 label="Device name"
@@ -598,57 +606,19 @@ export function DeviceEditor({
             );
           })}
         </fieldset>
+        {enabled && !config.sensors.length && (
+          <Notice>Add at least one sensor to enable this device.</Notice>
+        )}
         <div className="actions device-footer">
-          <Button type="submit" disabled={locked}>
-            Save draft
-          </Button>
           <Button
+            type="submit"
             variant="primary"
-            disabled={locked || !config.sensors.length}
-            onClick={() => {
-              const form = document.getElementById(
-                "device-form",
-              ) as HTMLFormElement;
-              if (form.reportValidity()) setConfirm(true);
-            }}
+            disabled={locked || (enabled && !config.sensors.length)}
           >
-            Activate device
+            Save
           </Button>
         </div>
       </form>
-      {confirm && (
-        <SidePanel
-          title="Activate device"
-          onClose={() => setConfirm(false)}
-          busy={op.busy}
-          footer={
-            <>
-              <Button disabled={op.busy} onClick={() => setConfirm(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                disabled={op.busy}
-                onClick={() => void save(true)}
-              >
-                Activate device
-              </Button>
-            </>
-          }
-        >
-          <p>
-            Studio will run the assigned actions every {config.interval_minutes}{" "}
-            minutes using their current configurations. This may capture camera
-            images and operate configured lights.
-          </p>
-          <p>
-            {config.publish
-              ? "The device and its sensors will be published through central MQTT Discovery."
-              : "Home Assistant publication is disabled for this device."}
-          </p>
-          <Notice error>{op.error}</Notice>
-        </SidePanel>
-      )}
     </section>
   );
 }

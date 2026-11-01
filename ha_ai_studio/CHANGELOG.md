@@ -1,3 +1,12 @@
+## 0.0.14
+
+- Add configurable virtual Devices with independent measurement schedules, multiple sensors and optional Home Assistant MQTT discovery.
+- Compact Device settings and sensor editing, with live measurement logs and clearer status information.
+- Control device operation with an Active checkbox applied by Save; keep the Save button at the end of the form.
+- Preserve specific reading and alignment failures and publish a Status Message diagnostic entity for each sensor.
+- Preserve last accepted readings on failure and clear diagnostic errors after successful recovery.
+- Extend coverage for device settings, persistence, sensor identity and isolated MQTT discovery diagnostics.
+
 ## 0.0.13
 
 - Fix a timing-dependent MQTT integration test failure after Action restart by waiting for the background subscription instead of opening a competing connection.

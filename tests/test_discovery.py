@@ -32,7 +32,7 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_explicit_devices_and_stable_ids(self):
         desired=self.d.desired()
         entities=[p for t,p in desired.items() if t.endswith('/config')]
-        self.assertEqual(len(entities),4)
+        self.assertEqual(len(entities),5)
         self.assertTrue(all(p['device']['identifiers']==[self.prefix] for p in entities))
         self.assertFalse(any('active_actions' in t for t in desired))
         self.assertFalse(any(self.studio.get('reader').identity['prefix'] in t for t in desired))
@@ -176,7 +176,7 @@ class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(payload=='' for _,payload in calls[:3]))
             self.assertEqual({t for t,p in calls if p==''},set(legacy)-{legacy[0]})
             configs=[topic for item in restored.discovery.data['owned'] for topic in item['topics'] if topic.endswith('/config')]
-            self.assertEqual(len(configs),4)
+            self.assertEqual(len(configs),5)
             self.assertTrue(all(t.startswith('custom-ha/') for t in configs))
         await restored.close()
 

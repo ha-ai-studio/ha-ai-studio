@@ -4,7 +4,7 @@ import { it, expect, vi } from "vitest";
 import { App } from "../App";
 import type { DeviceState } from "../lib/types";
 
-it("creates a device, assigns independent actions, saves drafts, activates, reads and deactivates without browser MQTT", async () => {
+it("creates a device, assigns independent actions, saves the Active checkbox atomically, reads and disables without browser MQTT", async () => {
   const devices: DeviceState[] = [];
   const requests: string[] = [];
   const actions = ["Reader", "Temperature"].map((name, i) => ({
@@ -50,11 +50,11 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
       else if (endpoint === "device") {
         if (body) {
           devices[0].draft = body.config;
-          if (body.activate) {
-            devices[0].active = structuredClone(body.config);
-            devices[0].enabled = true;
-            devices[0].status = "ready";
-          }
+          expect(typeof body.enabled).toBe("boolean");
+          expect(body).not.toHaveProperty("activate");
+          devices[0].active = structuredClone(body.config);
+          devices[0].enabled = body.enabled;
+          devices[0].status = body.enabled ? "ready" : "disabled";
         }
         result = devices[0];
       } else if (endpoint === "device-read") {
@@ -118,21 +118,23 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
   expect(screen.queryByLabelText("Measurement type")).not.toBeInTheDocument();
   await userEvent.type(screen.getAllByLabelText(/^Unit/)[0], "m³");
   await userEvent.type(screen.getAllByLabelText(/^Unit/)[1], "°C");
-  await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
-  await screen.findByText("Draft saved. Active measurements are unchanged.");
-  expect(devices[0].active).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Settings saved. Device is inactive.");
+  expect(devices[0].enabled).toBe(false);
+  expect(devices[0].active).toEqual(devices[0].draft);
   expect(devices[0].draft.sensors.map((s) => s.action_id)).toEqual([
     "action-0",
     "action-1",
   ]);
-  await userEvent.click(
-    screen.getByRole("button", { name: "Activate device" }),
-  );
-  await userEvent.click(
-    within(screen.getByRole("dialog")).getByRole("button", {
-      name: "Activate device",
-    }),
-  );
+  expect(
+    screen.queryByRole("button", { name: "Activate device" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Deactivate" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByLabelText("Active", { exact: true }));
+  expect(devices[0].enabled).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Read now" })).toBeEnabled(),
   );
@@ -141,11 +143,19 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
   expect(screen.getByLabelText("Measurement log")).toHaveTextContent(
     "Measurement finished: ready.",
   );
-  await userEvent.type(screen.getByLabelText("Device name"), " draft");
-  await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
-  await screen.findByText("Draft saved. Active measurements are unchanged.");
+  await userEvent.type(screen.getByLabelText("Device name"), " updated");
+  expect(devices[0].active?.name).toBe("Water meter");
   expect(screen.getByRole("button", { name: "Read now" })).toBeDisabled();
-  await userEvent.click(screen.getByRole("button", { name: "Deactivate" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText(
+    "Settings saved. Device is active; the next measurement is scheduled.",
+  );
+  expect(devices[0].active?.name).toBe("Water meter updated");
+  expect(screen.getByRole("button", { name: "Read now" })).toBeEnabled();
+  await userEvent.click(screen.getByLabelText("Active", { exact: true }));
+  expect(devices[0].enabled).toBe(true);
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("Settings saved. Device is inactive.");
   await waitFor(() => expect(devices[0].enabled).toBe(false));
   await userEvent.click(screen.getByRole("button", { name: "← Devices" }));
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
@@ -157,14 +167,9 @@ it("creates a device, assigns independent actions, saves drafts, activates, read
   await waitFor(() => expect(devices).toHaveLength(0));
   expect(
     requests.every((path) =>
-      [
-        "devices",
-        "actions",
-        "device",
-        "device-read",
-        "device-deactivate",
-        "delete-device",
-      ].includes(path),
+      ["devices", "actions", "device", "device-read", "delete-device"].includes(
+        path,
+      ),
     ),
   ).toBe(true);
 });
@@ -272,7 +277,7 @@ it("keeps errors visible on collapsed sensors and reveals invalid advanced field
   await userEvent.type(sensorId, "INVALID");
   await userEvent.click(advanced.querySelector("summary")!);
   await userEvent.click(outer.querySelector("summary")!);
-  await userEvent.click(screen.getByRole("button", { name: "Save draft" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(outer.open).toBe(true));
   expect(advanced.open).toBe(true);
   expect(sensorId).toBeVisible();
@@ -283,12 +288,90 @@ it("keeps errors visible on collapsed sensors and reveals invalid advanced field
   await userEvent.type(deviceClass, "Invalid Class");
   await userEvent.click(advanced.querySelector("summary")!);
   await userEvent.click(outer.querySelector("summary")!);
-  await userEvent.click(
-    screen.getByRole("button", { name: "Activate device" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(outer.open).toBe(true));
   expect(advanced.open).toBe(true);
   expect(deviceClass).toBeVisible();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(mutations).toEqual([]);
+});
+
+it("refreshes an untouched Active checkbox and preserves local edits after a failed Save", async () => {
+  const { DeviceEditor } = await import("./DevicesPage");
+  const draft = {
+    name: "Fixture",
+    interval_minutes: 30,
+    publish: false,
+    sensors: [
+      {
+        id: "serial",
+        name: "Serial",
+        unit: "",
+        action_id: "reader",
+        reading: "serial",
+        device_class: "",
+        cumulative: false,
+        max_change: null,
+      },
+    ],
+  };
+  let persistedEnabled = true;
+  const onDirty = vi.fn();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (target: URL, options: RequestInit) => {
+      if (options.method === "POST")
+        return {
+          ok: false,
+          json: async () => ({ error: "Settings could not be saved." }),
+        };
+      return {
+        ok: true,
+        json: async () =>
+          new URL(target).pathname.endsWith("/actions")
+            ? {
+                actions: [
+                  {
+                    definition: { id: "reader", name: "Reader" },
+                    supported: true,
+                    enabled: false,
+                  },
+                ],
+              }
+            : {
+                id: "fixture",
+                draft,
+                active: draft,
+                enabled: persistedEnabled,
+                busy: false,
+                status: persistedEnabled ? "ready" : "disabled",
+                publication: "Not published",
+                values: {},
+              },
+      };
+    }),
+  );
+  render(
+    <DeviceEditor
+      id="fixture"
+      back={() => {}}
+      onDirty={onDirty}
+      onBusy={() => {}}
+    />,
+  );
+  const active = await screen.findByLabelText("Active", { exact: true });
+  expect(active).toBeChecked();
+  persistedEnabled = false;
+  await waitFor(() => expect(active).not.toBeChecked(), { timeout: 3500 });
+  expect(onDirty).toHaveBeenLastCalledWith(false);
+  await userEvent.click(active);
+  await userEvent.type(screen.getByLabelText("Device name"), " edited");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("Settings could not be saved.")).toBeVisible();
+  expect(active).toBeChecked();
+  expect(screen.getByLabelText("Device name")).toHaveValue("Fixture edited");
+  expect(screen.getByText("disabled", { exact: true })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Read now" })).toBeDisabled();
+  expect(onDirty).toHaveBeenLastCalledWith(true);
+  expect(persistedEnabled).toBe(false);
 });

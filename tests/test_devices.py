@@ -83,6 +83,37 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(iter(self.action.jobs.values()))['source'], 'device')
         self.assertEqual(next(iter(self.action.jobs.values()))['execution'], 'success')
 
+    async def test_concrete_reading_errors_and_diagnostic_messages(self):
+        broker_id = (await self.studio.brokers.save(broker()))['brokers'][0]['id']
+        await self.studio.discovery.save({**DEFAULT, 'enabled': True, 'broker_id': broker_id})
+        item = await configured_device(self.studio, [sensor(), sensor('serial', kind='number', unit='')], publish=True)
+        await self.run_device(item['id'], [reading(), reading('serial', '001234', '')])
+        alignment_error = 'Alignment reference was not found confidently.'
+        with patch.object(self.action, 'execute', AsyncMock(return_value={
+                'status': 'unreadable', 'message': alignment_error, 'readings': []})):
+            self.manager.start_read(item['id'])
+            await self.manager.tasks[item['id']]
+        for key in ('water', 'serial'):
+            self.assertEqual(self.manager.get(item['id'])['values'][key]['error'], alignment_error)
+            self.assertEqual(self.studio.discovery.desired()[item['identity']+'/status_message_'+key], alignment_error)
+        self.assertEqual(self.manager.get(item['id'])['values']['water']['value'], 123)
+        reason = 'Frame test-frame: Model fit is below the configured threshold.'
+        await self.run_device(item['id'], [{**reading(status='unreadable', value=None), 'reason': reason}, reading('serial', '001234', '')])
+        desired = self.studio.discovery.desired()
+        self.assertEqual(desired[item['identity']+'/status_message_water'], reason)
+        self.assertEqual(desired[item['identity']+'/status_message_serial'], 'Reading successful.')
+        entity = desired['homeassistant/sensor/'+item['identity']+'/status_message_water/config']
+        self.assertEqual(entity['entity_category'], 'diagnostic')
+        self.assertEqual(entity['name'], 'Water Status Message')
+        restored = Studio(self.tmp.name)
+        self.assertEqual(restored.devices.get(item['id'])['values']['water']['error'], reason)
+        await restored.close()
+        await self.run_device(item['id'], [{**reading(status='unreadable', value=None), 'reason': 'x'*300}, reading('serial', '001234', '')])
+        self.assertEqual(len(self.studio.discovery.desired()[item['identity']+'/status_message_water']), 255)
+        self.assertEqual(len(self.manager.get(item['id'])['values']['water']['error']), 300)
+        await self.run_device(item['id'], [reading(), reading('serial', '001234', '')])
+        self.assertEqual(self.studio.discovery.desired()[item['identity']+'/status_message_water'], 'Reading successful.')
+
     async def test_independent_failure_and_preserved_value(self):
         item = await configured_device(self.studio, [sensor(), sensor('temperature', 'other', 'temperature', '°C')])
         other = self.studio.get('other')
@@ -107,6 +138,59 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         for readings in ([], [reading(), reading()], [reading(status='unreadable')]):
             await self.run_device(item['id'], readings)
             self.assertEqual(self.manager.get(item['id'])['values']['water']['value'], 123)
+
+    async def test_save_applies_configuration_and_enabled_state_atomically(self):
+        item = await configured_device(self.studio)
+        await self.run_device(item['id'], [reading()])
+        identity = item['identity']
+        old_bindings = copy.deepcopy(self.manager.get(item['id'])['bindings'])
+        config = copy.deepcopy(item['draft']);config['name'] = 'Saved name';config['interval_minutes'] = 15
+        with patch.object(self.action, 'check_config', side_effect=Invalid('Action temporarily unavailable.')):
+            result = await self.manager.save(item['id'], {'config': config, 'enabled': False})
+        self.assertFalse(result['enabled']);self.assertEqual(result['status'], 'disabled')
+        self.assertIsNone(result['next_run']);self.assertEqual(result['draft'], config);self.assertEqual(result['active'], config)
+        self.assertEqual(result['identity'], identity);self.assertEqual(result['values']['water']['value'], 123)
+        self.assertEqual(self.manager.get(item['id'])['bindings'], old_bindings)
+        with self.assertRaises(Invalid):self.manager.start_read(item['id'])
+        original = copy.deepcopy(self.manager.data)
+        with patch.object(self.manager.store, 'write', side_effect=OSError('storage failed')):
+            with self.assertRaises(OSError):await self.manager.save(item['id'], {'config': config, 'enabled': True})
+        self.assertEqual(self.manager.data, original)
+        with patch.object(self.action, 'check_config', side_effect=Invalid('Invalid Action settings.')):
+            with self.assertRaises(Invalid):await self.manager.save(item['id'], {'config': config, 'enabled': True})
+        self.assertEqual(self.manager.data, original)
+        result = await self.manager.save(item['id'], {'config': config, 'enabled': True})
+        self.assertTrue(result['enabled']);self.assertEqual(result['active'], config)
+        self.assertAlmostEqual(result['next_run'] - time.time(), 900, delta=2)
+        restored = Studio(self.tmp.name)
+        try:
+            self.assertTrue(restored.devices.public(item['id'])['enabled'])
+            self.assertEqual(restored.devices.public(item['id'])['active'], config)
+        finally:await restored.close()
+
+    async def test_unpublished_inactive_settings_remain_editable_until_enabled(self):
+        item = self.manager.create({'name': 'Inactive setup'})
+        config = copy.deepcopy(item['draft']);config['sensors'] = [sensor(kind='number', unit='')]
+        await self.manager.save(item['id'], {'config': config, 'enabled': False})
+        self.assertEqual(self.manager.get(item['id'])['sensor_identities'], {})
+        config['sensors'] = [sensor()]
+        result = await self.manager.save(item['id'], {'config': config, 'enabled': False})
+        self.assertEqual(result['active']['sensors'][0]['unit'], 'm³')
+        self.assertFalse(result['enabled'])
+        await self.manager.save(item['id'], {'config': config, 'enabled': True})
+        self.assertIn('water', self.manager.get(item['id'])['sensor_identities'])
+
+    async def test_disabled_save_preserves_identity_rules_and_validates_enabled(self):
+        item = await configured_device(self.studio)
+        config = copy.deepcopy(item['draft']);config['sensors'][0]['unit'] = 'L'
+        with self.assertRaises(Invalid):await self.manager.save(item['id'], {'config': config, 'enabled': False})
+        for enabled in (0, 1, None, 'true'):
+            with self.assertRaises(Invalid):await self.manager.save(item['id'], {'config': item['draft'], 'enabled': enabled})
+        with self.assertRaises(Invalid):await self.manager.save(item['id'], {'config': item['draft'], 'enabled': False, 'activate': True})
+        empty = self.manager.create({'name': 'Empty device'})
+        result = await self.manager.save(empty['id'], {'config': empty['draft'], 'enabled': False})
+        self.assertFalse(result['enabled'])
+        with self.assertRaises(Invalid):await self.manager.save(empty['id'], {'config': empty['draft'], 'enabled': True})
 
     async def test_draft_snapshot_and_removed_sensor_history(self):
         item = await configured_device(self.studio)
@@ -203,7 +287,7 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.save(item['id'], {'config': config, 'activate': True})
         desired = self.studio.discovery.desired()
         entities = [p for t, p in desired.items() if t.endswith('/config')]
-        self.assertEqual(len(entities), 4)
+        self.assertEqual(len(entities), 5)
         self.assertEqual({tuple(e['device']['identifiers']) for e in entities}, {(item['identity'],)})
         self.manager.deactivate(item['id'])
         self.assertEqual(self.studio.discovery.desired()[item['identity']+'/status'], 'disabled')
@@ -212,6 +296,34 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
             transport.return_value.publish.side_effect = OSError('offline')
             with self.assertRaises(OSError):await self.studio.discovery.reconcile()
         self.assertEqual(self.manager.data, before)
+
+    async def test_disabled_save_reconciles_only_removed_owned_discovery_topics(self):
+        broker_id = (await self.studio.brokers.save(broker()))['brokers'][0]['id']
+        await self.studio.discovery.save({**DEFAULT, 'enabled': True, 'broker_id': broker_id})
+        item = await configured_device(self.studio, [sensor(), sensor('temperature', kind='temperature', unit='°C')], publish=True)
+        await self.run_device(item['id'], [reading(), reading('temperature', 20, '°C')])
+        config = copy.deepcopy(item['draft'])
+        with patch('app.discovery.MQTT') as transport, patch.object(self.action, 'execute', AsyncMock()) as execute:
+            await self.studio.discovery.reconcile()
+            before = self.studio.discovery.desired()
+            transport.return_value.publish.reset_mock()
+            config['sensors'] = config['sensors'][:1]
+            await self.manager.save(item['id'], {'config': config, 'enabled': False})
+            desired = self.studio.discovery.desired()
+            await self.studio.discovery.reconcile()
+            removed = {call.args[0] for call in transport.return_value.publish.call_args_list if call.args[1] == ''}
+            self.assertEqual(removed, set(before) - set(desired))
+            self.assertEqual(desired[item['identity'] + '/status'], 'disabled')
+            self.assertEqual(self.manager.public(item['id'])['values']['temperature']['value'], 20)
+            for topic in set(before) & set(desired):
+                if topic.endswith('/config'):self.assertEqual(before[topic]['unique_id'], desired[topic]['unique_id'])
+            transport.return_value.publish.reset_mock()
+            config['publish'] = False
+            await self.manager.save(item['id'], {'config': config, 'enabled': False})
+            await self.studio.discovery.reconcile()
+            removed = {call.args[0] for call in transport.return_value.publish.call_args_list if call.args[1] == ''}
+            self.assertEqual(removed, set(desired) - set(self.studio.discovery.desired()))
+            execute.assert_not_awaited()
 
     async def test_overdue_schedule_runs_once_and_disabled_stays_idle(self):
         item = await configured_device(self.studio)

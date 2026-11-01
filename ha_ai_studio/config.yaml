@@ -1,5 +1,5 @@
 name: HA AI Studio
-version: "0.0.13"
+version: "0.0.14"
 slug: ha_ai_studio
 description: Your studio for MQTT-driven AI Actions and Home Assistant automations
 arch: [amd64]
