@@ -1,3 +1,9 @@
+## 0.0.17
+
+- Show preparation progress while an Action's Python environment is being installed or verified; open configuration automatically once it is ready.
+- Keep installation details and environment recovery accessible when setup fails.
+- Add derived rate-of-change Device sensors and improve spacing in sensor configuration.
+
 ## 0.0.16
 
 ### Device functions

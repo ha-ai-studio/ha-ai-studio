@@ -6,7 +6,7 @@ import json
 from .domain import Invalid
 from .mqtt import MQTT
 
-VERSION = '0.0.16'
+VERSION = '0.0.17'
 DEFAULT = {'enabled': False, 'broker_id': None, 'prefix': 'homeassistant', 'ha_status_topic': 'homeassistant/status'}
 
 
