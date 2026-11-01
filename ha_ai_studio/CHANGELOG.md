@@ -1,3 +1,10 @@
+## 0.0.19
+
+- Add bounded, read-only sensor history access for trusted Actions using server-owned Home Assistant credentials.
+- Support sensor selection with the shared entity picker, inline search and clear controls, and numeric draft defaults.
+- Integrate the Edge-Meter Leak detection Action with Device sensors and Execute functions while preserving measurement schedules.
+- Add synthetic history, runner, Device-function and UI tests. No Action is installed, activated or published automatically.
+
 ## 0.0.18
 
 - Export saved Device configurations as versioned JSON templates, including sensors, derived rates, functions and measurement intervals.

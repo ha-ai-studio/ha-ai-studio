@@ -1,5 +1,6 @@
 import {
   EntityPicker,
+  EntitySearchField,
   type EntityPickerOptions,
   type HAEntity,
 } from "./EntityPicker";
@@ -17,6 +18,22 @@ export function simpleSchema(schema: Schema): boolean {
     )
   );
 }
+// Defaults populate only missing numeric draft fields; persisted settings are untouched.
+function settingsWithDefaults(schema: Schema, initial: Json): Record<string, Json> {
+  const settings: Record<string, Json> =
+    initial && typeof initial === "object" && !Array.isArray(initial)
+      ? { ...initial } : {};
+  for (const [key, property] of Object.entries(schema.properties ?? {})) {
+    if (!(key in settings) && !property.enum &&
+        ["number", "integer"].includes(property.type ?? "") &&
+        typeof property.default === "number" && Number.isFinite(property.default) &&
+        (property.type !== "integer" || Number.isInteger(property.default))) {
+      settings[key] = property.default;
+    }
+  }
+  return settings;
+}
+
 export function readSettings(
   schema: Schema,
   initial: Json,
@@ -30,10 +47,7 @@ export function readSettings(
       throw new Error("Provide valid settings JSON.");
     }
   }
-  const result: Record<string, Json> =
-    initial && typeof initial === "object" && !Array.isArray(initial)
-      ? { ...initial }
-      : {};
+  const result = settingsWithDefaults(schema, initial);
   for (const [key, property] of Object.entries(schema.properties ?? {})) {
     if (!(key in values)) {
       if (
@@ -83,16 +97,20 @@ export function SchemaEditor({
   onValues: (values: Record<string, string | boolean>) => void;
   onRaw: (raw: string) => void;
 }) {
-  const settings =
-    initial && typeof initial === "object" && !Array.isArray(initial)
-      ? initial
-      : {};
+  const [entityField, setEntityField] = useState<{ key: string; options: EntityPickerOptions } | null>(null);
+  const settings = settingsWithDefaults(schema, initial);
   return (
     <>
       <p>
         Settings are validated against the action schema. Git action preview is
         unavailable; use an isolated MQTT test instance.
       </p>
+      {entityField && <EntityPicker options={entityField.options}
+        onClose={() => setEntityField(null)}
+        onSelect={(entity) => {
+          onValues({...values, [entityField.key]: entity.entity_id});
+          setEntityField(null);
+        }} />}
       {!simpleSchema(schema) ? (
         <Textarea
           label="Settings JSON"
@@ -105,6 +123,15 @@ export function SchemaEditor({
           const label = p.title ?? key;
           const change = (value: string | boolean) =>
             onValues({ ...values, [key]: value });
+          if (p.type === "string" && p["x-ha-entity-domains"]?.length)
+            return (
+              <EntitySearchField key={key} label={label} hint={p.description}
+                value={String(values[key] ?? settings[key] ?? "")}
+                onClear={() => change("")}
+                onChoose={() => setEntityField({key, options: {
+                  domains: p["x-ha-entity-domains"]!, title: `Select ${label}`,
+                }})} />
+            );
           if (p.enum)
             return (
               <Select

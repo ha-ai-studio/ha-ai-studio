@@ -25,6 +25,14 @@ The development server also mounts `LOCAL_ACTIONS_DIR` read-only (default: the s
 
 Actions may include a trusted custom configuration editor via `"editor": "ui/editor.js"` in their manifest. See the [plugin contract](ha_ai_studio/app/action_types/README.md) for the editor interface, source limits and trust model. Local development still uses real MQTT; browser checks must use synthetic fixtures.
 
+The Edge-Meter repository also provides **Leak detection**, which reads a cumulative
+water sensor's HA history. It requires Studio 0.0.19 or newer. Configure its
+`leak-status` / `leak-reason` readings on a Device and optionally add an Execute
+function. Notifications and follow-up actions remain in Home Assistant.
+For cross-repository integration tests, set `STUDIO_LOCAL_ACTIONS_DIR` to the
+Edge-Meter repository root when running `scripts/test.sh`; gateway tests also run
+without that optional source checkout.
+
 ## Install
 
 After the first successful container release, add `https://github.com/ha-ai-studio/ha-ai-studio` under **Settings → Apps → Install app → ⋮ → Repositories**, then install **HA AI Studio** and open its web UI through Ingress. This requires Home Assistant with Supervisor on amd64. The repository and GHCR package must be public for installation without registry credentials. The app is marked experimental. Action types are installed from Git repositories in Settings. Echo is maintained in the separate `ha-ai-studio-actions-core` repository; existing bundled Echo instances remain supported without automatic migration.

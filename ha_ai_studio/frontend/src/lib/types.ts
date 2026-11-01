@@ -5,6 +5,8 @@ export interface Schema {
   title?: string;
   description?: string;
   enum?: Json[];
+  default?: Json;
+  "x-ha-entity-domains"?: ("camera" | "light" | "switch" | "sensor")[];
   properties?: Record<string, Schema>;
   required?: string[];
   additionalProperties?: boolean | Schema;

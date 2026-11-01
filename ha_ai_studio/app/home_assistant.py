@@ -8,14 +8,15 @@ from pathlib import Path
 import re
 import socket
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode, quote
+from datetime import datetime, timedelta, timezone
 import uuid
 import aiohttp
 from .domain import Invalid
 from .store import Store
 from .assets import image_info, MAX_IMAGE
 
-ENTITY = re.compile(r'(camera|light|switch)\.[a-z0-9_]{1,200}')
+ENTITY = re.compile(r'(camera|light|switch|sensor)\.[a-z0-9_]{1,200}')
 
 
 def connection():
@@ -72,7 +73,7 @@ class HomeAssistant:
         return hashlib.sha256(config[0].encode()).hexdigest() if config else ''
 
     async def search(self,domains,query):
-        if not domains or not set(domains)<= {'camera','light','switch'} or len(query)>120:raise Invalid('Choose camera, light or switch entities and a search up to 120 characters.')
+        if not domains or not set(domains)<= {'camera','light','switch','sensor'} or len(query)>120:raise Invalid('Choose camera, light, switch or sensor entities and a search up to 120 characters.')
         states=await self.request('GET','states')
         if not isinstance(states,list):raise Invalid('Home Assistant returned an invalid entity list.')
         result=[]
@@ -90,6 +91,36 @@ class HomeAssistant:
         state=value.get('state','unknown')
         if state in ('unknown','unavailable'):raise Invalid('Selected Home Assistant entity is unavailable.')
         return {'entity_id':entity,'state':state}
+
+    async def history(self, entity, hours):
+        if not ENTITY.fullmatch(entity) or not entity.startswith('sensor.'):
+            raise Invalid('History requires a configured sensor entity.')
+        if type(hours) is not int or not 1 <= hours <= 168:
+            raise Invalid('History period must be between 1 and 168 hours.')
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
+        query = urlencode({'filter_entity_id': entity, 'end_time': end.isoformat(),
+                           'significant_changes_only': '0', 'skip_initial_state': '1'})
+        raw = await self.request('GET', 'history/period/' + quote(start.isoformat(), safe='') + '?' + query)
+        if not isinstance(raw, list) or len(raw) > 1 or (raw and not isinstance(raw[0], list)):
+            raise Invalid('Home Assistant returned invalid sensor history.')
+        rows = raw[0] if raw else []
+        if len(rows) > 10000:
+            raise Invalid('Sensor history exceeds 10000 records. Select a shorter period.')
+        readings = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get('entity_id') != entity:
+                raise Invalid('Home Assistant returned invalid sensor history.')
+            attrs = row.get('attributes', {})
+            if not isinstance(attrs, dict):
+                raise Invalid('Home Assistant returned invalid sensor history.')
+            # Never forward arbitrary attributes, context, or other entities.
+            record = {'state': row.get('state'), 'timestamp': row.get('last_updated'),
+                      'unit': attrs.get('unit_of_measurement'), 'state_class': attrs.get('state_class')}
+            if any(value is not None and (not isinstance(value, str) or len(value) > 100) for value in record.values()):
+                raise Invalid('Home Assistant returned invalid sensor history.')
+            readings.append(record)
+        return {'entity_id': entity, 'start': start.isoformat(), 'end': end.isoformat(), 'readings': readings}
 
     async def service(self,entity,action,**data):
         await self.request('POST','services/'+entity.split('.')[0]+'/'+action,{'entity_id':entity,**data})
@@ -147,9 +178,11 @@ class HomeAssistant:
                                     async with self.lock:
                                         if allowed & (self.in_use | set(self.pending)):raise Invalid('A selected entity is busy or awaiting light restoration.')
                                         self.in_use.update(allowed);reserved=True
-                                labels={'state':'Checking entity state','capture':'Fetching camera image','light_on':'Preparing illumination','restore':'Restoring illumination'}
+                                labels={'history':'Reading sensor history','state':'Checking entity state','capture':'Fetching camera image','light_on':'Preparing illumination','restore':'Restoring illumination'}
                                 if operation!='wait':log(labels.get(operation,'Device operation')+': '+entity)
                                 if operation=='state':result=await self.state(entity)
+                                elif operation=='history' and entity.startswith('sensor.'):
+                                    result=await self.history(entity,value.get('hours'))
                                 elif operation=='wait' and entity.startswith('camera.'):
                                     seconds=value.get('seconds');phase=value.get('phase')
                                     if type(seconds) not in (int,float) or not 0<=seconds<=20 or phase not in ('before_capture','between_captures'):raise Invalid('Invalid capture wait event.')
