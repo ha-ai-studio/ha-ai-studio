@@ -22,7 +22,7 @@ async def make_app():
     source.mkdir(parents=True)
     (source/'ui').mkdir()
     data={'id':'reader','name':'Synthetic measurement action','description':'Isolated numeric measurements',
-          'version':'1','python':f'{sys.version_info.major}.{sys.version_info.minor}',
+          'functions':['execute'],'version':'1','python':f'{sys.version_info.major}.{sys.version_info.minor}',
           'entrypoint':'action.py','editor':'ui/editor.js','settings_schema':{'type':'object'},
           'input_schema':{'type':'object'},'output_schema':{'type':'object'}}
     (source/'action.json').write_text(json.dumps(data))

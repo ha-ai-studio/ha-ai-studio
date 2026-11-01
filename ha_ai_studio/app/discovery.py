@@ -6,7 +6,7 @@ import json
 from .domain import Invalid
 from .mqtt import MQTT
 
-VERSION = '0.0.15'
+VERSION = '0.0.16'
 DEFAULT = {'enabled': False, 'broker_id': None, 'prefix': 'homeassistant', 'ha_status_topic': 'homeassistant/status'}
 
 
@@ -75,7 +75,7 @@ class Discovery:
                 self.data['config'] = copy.deepcopy(value)
                 try:
                     self.brokers.check_topology()
-                    if value['ha_status_topic'] in self.desired():raise Invalid('Home Assistant status topic must not be a Studio-owned topic.')
+                    if value['ha_status_topic'] in set(self.desired()) | set(self.command_routes()):raise Invalid('Home Assistant status topic must not be a Studio-owned topic.')
                 except Exception:
                     self.data['config'] = previous
                     raise
@@ -102,6 +102,16 @@ class Discovery:
                     'state_topic': topic, 'availability_topic': availability, **extra}
                 return topic
             result[entity('status', 'Device status', entity_category='diagnostic')] = item['status']
+            for function in active['functions']:
+                key = 'function_' + function['id']
+                result[f"{config['prefix']}/button/{prefix}/{key}/config"] = {
+                    'unique_id': prefix + '_' + key, 'name': function['name'], 'device': device,
+                    'command_topic': self.command_topic(item, function), 'payload_press': 'execute',
+                    'command_template': '{{ {"request_id": now().isoformat() ~ "-" ~ (range(0, 100000) | random)} | to_json }}',
+                    'qos': 1, 'retain': False,
+                    'availability_mode': 'all', 'availability': [
+                        {'topic': availability}, {'topic': prefix + '/function_availability'}]}
+                result[prefix + '/function_availability'] = 'online' if item['enabled'] and not self.studio.devices.busy(item['id']) else 'offline'
             for sensor in active['sensors']:
                 key = 'value_' + sensor['id']
                 value = item['values'].get(sensor['id'], {})
@@ -132,11 +142,37 @@ class Discovery:
         result[availability] = 'online'
         return result
 
+    @staticmethod
+    def command_topic(item, function):
+        return item['identity'] + '/function/' + function['id'] + '/request'
+
+    def command_routes(self, enabled_only=False):
+        result = {}
+        for item in self.studio.devices.data['items'].values():
+            config = item['active']
+            if not config or not config['publish'] or (enabled_only and not item['enabled']):continue
+            for function in config['functions']:
+                result[self.command_topic(item, function)] = (item['id'], function['id'])
+        return result
+
+    def receive_command(self, broker, topic, payload):
+        # Recheck current authorization: queued callbacks may outlive a reconfiguration.
+        config = self.data['config']
+        if not config['enabled'] or config['broker_id'] != broker:return
+        route = self.command_routes(enabled_only=True).get(topic)
+        if not route:return
+        try:
+            value = json.loads(payload)
+            if not isinstance(value, dict) or set(value) != {'request_id'}:raise Invalid('Invalid function command.')
+            self.studio.devices.invoke_function(route[0], {'function_id': route[1], **value}, remote=True)
+        except Exception:
+            self.studio.devices.log(route[0], 'Function command rejected. Check request ID, active configuration and device availability.')
+
     def check_routes(self, route):
         config = self.data['config']
-        targets = [(i['broker_id'], set(i['topics'])) for i in self.data['owned']]
+        targets = [(i['broker_id'], set(i['topics']) | set(i.get('commands', []))) for i in self.data['owned']]
         if config['enabled']:
-            targets.append((config['broker_id'], set(self.desired()) | {config['ha_status_topic']}))
+            targets.append((config['broker_id'], set(self.desired()) | set(self.command_routes()) | {config['ha_status_topic']}))
         for broker, topics in targets:
             for side, key in (('input_broker', 'request_topic'), ('output_broker', 'result_topic')):
                 if self.brokers.endpoint(route[side]) == self.brokers.endpoint(broker) and route[key] in topics:
@@ -197,17 +233,21 @@ class Discovery:
                 if record and record['endpoint'] and record['endpoint'] != fingerprint:
                     raise Invalid('Restore the previous broker endpoint to finish cleanup.')
                 if not record:
-                    record = {'broker_id': broker, 'endpoint': fingerprint, 'topics': []}
+                    record = {'broker_id': broker, 'endpoint': fingerprint, 'topics': [], 'commands': []}
                     self.data['owned'].append(record)
+                commands = self.command_routes(enabled_only=True)
+                command_topics = sorted(self.command_routes())
+                commands_changed = record.get('commands', []) != command_topics
+                record['commands'] = command_topics
                 endpoint_changed = record['endpoint'] != fingerprint
                 record['endpoint'] = fingerprint
                 self.brokers.pin_cleanup(broker, fingerprint)
                 topics = sorted(set(record['topics']) | set(desired))
-                if topics != record['topics'] or endpoint_changed:
+                if topics != record['topics'] or endpoint_changed or commands_changed:
                     record['topics'] = topics
                     self.persist()  # Write ownership BEFORE publication, including partial failures.
                 settings = self.brokers.get(broker)['settings']
-                signature = json.dumps(settings, sort_keys=True)
+                signature = json.dumps([settings, sorted(commands), config['ha_status_topic']], sort_keys=True)
                 if not self.client or self.connection != signature:
                     await self.disconnect()
                     loop = asyncio.get_running_loop()
@@ -215,7 +255,8 @@ class Discovery:
                         if payload == b'online':loop.call_soon_threadsafe(setattr, self, 'birth', True)
                     self.client = MQTT({'prefix': self.studio.namespace+'_discovery', 'device_id': self.studio.namespace,
                         'request_topic': config['ha_status_topic'], 'accept_retained': True,
-                        'availability_topic': self.studio.namespace+'/discovery/availability'}, birth)
+                        'availability_topic': self.studio.namespace+'/discovery/availability'}, birth,
+                        commands={topic: (lambda payload, topic=topic: loop.call_soon_threadsafe(self.receive_command, broker, topic, payload)) for topic in commands})
                     await asyncio.to_thread(self.client.connect, settings)
                     self.connection = signature
                 if not self.client.ready.is_set():raise Invalid('Discovery is reconnecting.')

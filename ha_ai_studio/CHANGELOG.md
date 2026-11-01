@@ -1,3 +1,11 @@
+## 0.0.16
+
+### Device functions
+
+- Add named Execute functions to Devices independently of sensors, with automatic Home Assistant MQTT buttons when the Device is published.
+- Execute the selected Action using its saved binding and update only its sensors on that Device; preserve the automatic measurement schedule.
+- Support function-only Devices, explicit publication, durable cleanup, retained-command rejection and restart-safe deduplication of the last 256 function request IDs per Device.
+
 ## 0.0.15
 
 - Check Git and GitHub Release repositories for updates without changing existing Action instances.

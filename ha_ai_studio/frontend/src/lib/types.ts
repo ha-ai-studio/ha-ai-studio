@@ -25,6 +25,7 @@ export interface ActionType {
   name: string;
   dynamic?: boolean;
   capabilities?: string[];
+  functions?: string[];
   local?: boolean;
   editor?: string | null;
   version?: string;
@@ -141,6 +142,7 @@ export interface ApiResponses {
   devices: { devices: DeviceState[] };
   device: DeviceState;
   "device-read": DeviceState;
+  "device-function": DeviceState;
   "device-deactivate": DeviceState;
   "delete-device": { devices: DeviceState[] };
   actions: { actions: ActionState[]; types: ActionType[] };
@@ -180,11 +182,18 @@ export interface DeviceSensor {
   reading: string;
   max_change: number | null;
 }
+export interface DeviceFunction {
+  id: string;
+  name: string;
+  action_id: string;
+  function: string;
+}
 export interface DeviceConfig {
   name: string;
   interval_minutes: number;
   publish: boolean;
   sensors: DeviceSensor[];
+  functions?: DeviceFunction[];
 }
 export interface DeviceState {
   logs?: { time: string; message: string }[];

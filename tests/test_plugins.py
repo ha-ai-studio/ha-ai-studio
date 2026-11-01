@@ -21,6 +21,16 @@ class GitActions(unittest.IsolatedAsyncioTestCase):
         (self.fixture/'action.py').write_text('import os\ndef execute(data, settings):\n print("hidden-output")\n assert "DEV_MQTT_PASSWORD" not in os.environ\n assert "SUPERVISOR_TOKEN" not in os.environ\n return data\n')
     async def asyncTearDown(self):
         await self.studio.close();self.tmp.cleanup()
+    async def test_device_function_manifest_declaration_and_legacy_readings_contract(self):
+        from app.plugins import GitPlugin
+        for functions in (None, {}, 'read', ['unknown'], ['execute', 'execute'], [True]):
+            (self.fixture/'action.json').write_text(json.dumps({**self.data, 'functions': functions}))
+            with self.assertRaises(Invalid):await manifest(self.fixture)
+        for extra, expected in [({'functions':['execute']},['execute']), ({'output_schema':{'type':'object','properties':{'readings':{'type':'array'}}}},['execute']), ({'functions':[], 'output_schema':{'properties':{'readings':{}}}},[])]:
+            (self.fixture/'action.json').write_text(json.dumps({**self.data, **extra}))
+            record={'type':'sample','repository_id':'test','commit':'a'*40,'manifest':await manifest(self.fixture)}
+            self.assertEqual(GitPlugin(record,self.fixture).metadata['functions'],expected)
+
     async def seed(self):
         import shutil
         dest=self.studio.repositories.store.root/'sources'/'snapshot'/'actions'/'sample';dest.parent.mkdir(parents=True);shutil.copytree(self.fixture,dest)

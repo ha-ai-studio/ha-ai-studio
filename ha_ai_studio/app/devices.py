@@ -1,6 +1,7 @@
 """Virtual devices: independent measurements, durable schedules and stable identities."""
 import asyncio
 import copy
+import hashlib
 import json
 import math
 import re
@@ -11,6 +12,8 @@ from contextlib import AsyncExitStack
 from .domain import Invalid
 from .store import Store
 
+MAX_FUNCTION_REQUESTS = 256
+
 def migrate_sensor_profiles(data):
     """Preserve existing HA identities/metadata while removing Studio-specific types."""
     legacy = {'water': ('water', True), 'temperature': ('temperature', False),
@@ -18,6 +21,8 @@ def migrate_sensor_profiles(data):
     for item in [*data['items'].values(), *data['deleted']]:
         for config in (item['draft'], item['active']):
             if not config:continue
+            config.setdefault('functions', [])
+            for function in config['functions']:function.pop('publish', None)
             config.pop('type', None)  # Early development drafts had a device preset.
             for sensor in config['sensors']:
                 if 'kind' in sensor:
@@ -47,6 +52,8 @@ class Devices:
         self.store = Store(studio.store.root / 'devices')
         self.data = self.store.read('devices.json', {'items': {}, 'deleted': []})
         migrate_sensor_profiles(self.data)
+        for item in [*self.data['items'].values(), *self.data['deleted']]:
+            item.setdefault('function_requests', {})
         self.tasks = {}
         self.logs = {}
         self.editing = set()
@@ -56,7 +63,7 @@ class Devices:
         for item in self.data['items'].values():
             if item['status'] == 'running':
                 item['status'] = 'interrupted'
-                item['next_run'] = time.time() + (item['active'] or item['draft'])['interval_minutes'] * 60
+                item['next_run'] = time.time() + (item['active'] or item['draft'])['interval_minutes'] * 60 if (item['active'] or item['draft'])['sensors'] else None
         self.commit(self.data)
 
     def commit(self, candidate):
@@ -93,7 +100,7 @@ class Devices:
             configs = [item['active']] if active_only else [item['draft'], item['active']]
             if active_only and not item['enabled']:
                 continue
-            if any(c and any(s['action_id'] == action_id for s in c['sensors']) for c in configs):
+            if any(c and any(s['action_id'] == action_id for s in c['sensors'] + c['functions']) for c in configs):
                 return True
         return False
 
@@ -108,16 +115,18 @@ class Devices:
             raise Invalid('Maximum of 32 devices.')
         id = 'device-' + uuid.uuid4().hex[:16]
         config = {'name': value['name'].strip(), 'interval_minutes': 30,
-                  'publish': False, 'sensors': []}
+                  'publish': False, 'sensors': [], 'functions': []}
         candidate = copy.deepcopy(self.data)
         candidate['items'][id] = {'id': id, 'identity': self.studio.namespace + '_' + id,
             'draft': config, 'active': None, 'enabled': False, 'bindings': {}, 'values': {},
-            'status': 'disabled', 'last_attempt': None, 'next_run': None, 'sensor_identities': {}}
+            'status': 'disabled', 'last_attempt': None, 'next_run': None, 'sensor_identities': {}, 'function_requests': {}}
         self.commit(candidate)
         return self.public(id)
 
     def validate(self, config):
-        if not isinstance(config, dict) or set(config) != {'name', 'interval_minutes', 'publish', 'sensors'}:
+        config = copy.deepcopy(config)
+        if isinstance(config, dict):config.setdefault('functions', [])
+        if not isinstance(config, dict) or set(config) != {'name', 'interval_minutes', 'publish', 'sensors', 'functions'}:
             raise Invalid('Provide the complete device configuration.')
         if not name(config['name']):
             raise Invalid('Invalid device name.')
@@ -164,7 +173,20 @@ class Devices:
             source = by_id.get(sensor['rate']['source'])
             if source is None or 'rate' in source or source['id'] == sensor['id']:
                 raise Invalid('Rate source must be an Action sensor in this device; derived sources and cycles are not supported.')
-        return copy.deepcopy(config)
+        if not isinstance(config['functions'], list) or len(config['functions']) > 16:
+            raise Invalid('Provide up to 16 functions.')
+        ids = set()
+        for function in config['functions']:
+            if not isinstance(function, dict) or set(function) != {'id', 'name', 'action_id', 'function'}:
+                raise Invalid('Provide the complete function definition.')
+            if not identifier(function['id']) or function['id'] in ids or not name(function['name']):
+                raise Invalid('Function IDs must be unique lowercase names; provide a function name.')
+            ids.add(function['id'])
+            action = self.studio.get(function['action_id'])
+            from .plugins import device_functions
+            if not action.supported or function['function'] != 'execute' or 'execute' not in device_functions(action.plugin.metadata):
+                raise Invalid('Select an action that supports the Execute function.')
+        return config
 
     async def save(self, id, value):
         self.get(id)
@@ -187,11 +209,11 @@ class Devices:
             bindings = {}
             semantics_by_id = copy.deepcopy(current['sensor_identities'])
             if activate or apply_settings:
-                if activate and not config['sensors']:raise Invalid('Add at least one sensor before enabling the device.')
+                if activate and not (config['sensors'] or config['functions']):raise Invalid('Add at least one sensor or function before enabling the device.')
                 if config['publish'] and (activate or not current['active'] or not current['active']['publish']) and not self.studio.discovery.data['config']['enabled']:
                     raise Invalid('Enable central Home Assistant discovery in Settings before publishing devices.')
                 if activate:
-                    for action_id in sorted({s['action_id'] for s in config['sensors'] if 'rate' not in s}):
+                    for action_id in sorted({s['action_id'] for s in config['sensors'] + config['functions'] if 'rate' not in s}):
                         await locks.enter_async_context(self.studio.get(action_id).lock)
                 for sensor in config['sensors']:
                     old = semantics_by_id.get(sensor['id'])
@@ -199,14 +221,15 @@ class Devices:
                     if 'rate' in sensor:semantics.append(sensor['rate'])
                     if old and old != semantics:raise Invalid('A sensor’s published metadata and counter behavior cannot change. Add a new sensor ID instead.')
                     if activate or config['publish']:semantics_by_id[sensor['id']] = semantics
-                    if not activate or 'rate' in sensor:continue
-                    action = self.studio.get(sensor['action_id'])
+                for action_id in sorted({s['action_id'] for s in config['sensors'] + config['functions'] if 'rate' not in s}):
+                    if not activate:continue
+                    action = self.studio.get(action_id)
                     if action.environment:action.environment.require()
                     action_config = await action.check_config(action.config['active'] if action.enabled else action.config['draft'])
                     from .actions import parse
                     _, error = await parse(json.dumps({'request_id':'device-validation','data':{}}), action.plugin)
                     if error:raise Invalid('Device actions must accept an empty input object; configure their source in Action settings.')
-                    bindings[sensor['action_id']] = {'config': action_config,
+                    bindings[action_id] = {'config': action_config,
                         'plugin': copy.deepcopy(action.plugin.record) if action.environment else None}
             candidate = copy.deepcopy(self.data)
             item = candidate['items'][id]
@@ -224,13 +247,17 @@ class Devices:
                         item['values'].pop(sensor['id'], None)
             if activate:
                 item.update(active=copy.deepcopy(config), enabled=True, bindings=bindings,
-                            status='ready', next_run=time.time() + config['interval_minutes'] * 60)
+                            status='ready', next_run=time.time() + config['interval_minutes'] * 60 if config['sensors'] else None)
             elif apply_settings:
                 item.update(active=copy.deepcopy(config), enabled=False, status='disabled', next_run=None)
             # Validate new discovery topics before committing device activation.
             previous = self.data
             self.data = candidate
-            try:self.studio.brokers.check_topology()
+            try:
+                discovery = self.studio.discovery
+                if discovery.data['config']['ha_status_topic'] in set(discovery.desired()) | set(discovery.command_routes()):
+                    raise Invalid('Home Assistant status topic must not overlap device topics.')
+                self.studio.brokers.check_topology()
             finally:self.data = previous
             self.commit(candidate)
         return self.public(id)
@@ -255,34 +282,63 @@ class Devices:
         self.commit(candidate)
         return self.list()
 
-    def start_read(self, id):
+    def invoke_function(self, id, value, *, remote=False):
+        if not isinstance(value, dict) or set(value) != {'function_id', 'request_id'}:
+            raise Invalid('Provide function ID and request ID.')
+        request_id = value['request_id']
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128 or not request_id.strip() or any(ord(c) < 32 for c in request_id):
+            raise Invalid('Invalid function request ID.')
+        item = self.get(id)
+        config = item['active']
+        function = next((f for f in (config or {}).get('functions', []) if f['id'] == value['function_id']), None)
+        if not function:raise Invalid('Device function not found.')
+        if remote and not config['publish']:raise Invalid('Device function is not published.')
+        digest = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+        previous = item['function_requests'].get(request_id)
+        if previous:
+            if previous['digest'] != digest:raise Invalid('Function request ID was already used with a different payload.')
+            return self.public(id)
+        return self.start_read(id, function['action_id'], (request_id, digest, function))
+
+    def start_read(self, id, action_id=None, request=None):
         item = self.get(id)
         if self.error:raise Invalid(self.error)
         if id in self.editing:raise Invalid('Device configuration is being saved.')
         if not item['enabled'] or not item['active']:raise Invalid('Activate the device before reading.')
         if self.busy(id):raise Invalid('Device is already measuring.')
+        if action_id is None and not item['active']['sensors']:raise Invalid('Add sensors to read the whole device, or run a configured function.')
         candidate = copy.deepcopy(self.data)
+        if request:
+            request_id, digest, function = request
+            candidate['items'][id]['function_requests'][request_id] = {
+                'digest': digest, 'function': copy.deepcopy(function),
+                'binding': copy.deepcopy(item['bindings'][action_id])}
+            candidate['items'][id]['function_requests'] = dict(list(candidate['items'][id]['function_requests'].items())[-MAX_FUNCTION_REQUESTS:])
         candidate['items'][id].update(status='running', last_attempt=timestamp(),
-            next_run=time.time() + item['active']['interval_minutes'] * 60)
+            next_run=item['next_run'] if action_id else time.time() + item['active']['interval_minutes'] * 60 if item['active']['sensors'] else None)
+        sources = {s['id']: s['action_id'] for s in item['active']['sensors'] if 'rate' not in s}
         for sensor in item['active']['sensors']:
-            if 'rate' in sensor:
+            if 'rate' in sensor and (action_id is None or sources[sensor['rate']['source']] == action_id):
                 candidate['items'][id]['values'].setdefault(sensor['id'], {}).update(
                     status='unavailable', error='Waiting for a new valid source measurement.')
         self.commit(candidate)  # Durable intent before any action, including restart interruption.
         self.logs[id] = []
         self.log(id, 'Measurement started.')
-        self.tasks[id] = asyncio.create_task(self.measure(id))
+        self.tasks[id] = asyncio.create_task(self.measure(id, action_id))
         return self.public(id)
 
-    async def measure(self, id):
+    async def measure(self, id, selected_action=None):
         item = copy.deepcopy(self.get(id))
         config = item['active']
         values = copy.deepcopy(item['values'])
         successes = 0
+        action_successes = 0
+        targets = {selected_action} if selected_action else {s['action_id'] for s in config['sensors'] if 'rate' not in s}
         from .test_progress import current
         token = current.set(lambda message: self.log(id, message))
         try:
             for action_id, binding in item['bindings'].items():
+                if action_id not in targets:continue
                 sensors = [s for s in config['sensors'] if s['action_id'] == action_id]
                 try:
                     self.log(id, 'Waiting for action ' + action_id + '.')
@@ -300,7 +356,9 @@ class Devices:
                     self.log(id, 'Action finished. Validating sensor readings.')
                     output = result['data']
                     readings = output.get('readings') if isinstance(output, dict) else None
-                    if not isinstance(readings, list):raise Invalid('Action must return a readings array.')
+                    if sensors and not isinstance(readings, list):raise Invalid('Action must return a readings array.')
+                    if not sensors and isinstance(output, dict) and output.get('status') == 'unreadable':raise Invalid('Action could not read its source.')
+                    action_successes += 1
                     measured_at = time.time()
                     for sensor in sensors:
                         try:
@@ -373,8 +431,10 @@ class Devices:
                 candidate['items'][id]['values'] = copy.deepcopy(values)
                 self.commit(candidate)
             candidate = copy.deepcopy(self.data)
-            candidate['items'][id].update(status='ready' if successes == len(config['sensors']) else 'partial' if successes else 'error',
-                next_run=time.time() + config['interval_minutes'] * 60)
+            sources = {s['id']: s['action_id'] for s in config['sensors'] if 'rate' not in s}
+            expected = sum((sources[s['rate']['source']] if 'rate' in s else s['action_id']) in targets for s in config['sensors'])
+            candidate['items'][id].update(status='ready' if successes == expected and action_successes == len(targets) else 'partial' if successes else 'error',
+                next_run=item['next_run'] if selected_action else time.time() + config['interval_minutes'] * 60 if config['sensors'] else None)
             self.commit(candidate)
             self.log(id, 'Measurement finished: ' + self.get(id)['status'] + '.')
         except asyncio.CancelledError:
