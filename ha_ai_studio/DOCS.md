@@ -1,20 +1,20 @@
-# HA AI Studio — configured Actions
+# HA AI Studio — MQTT guide
 
-Home Assistant controls triggers, schedules, conditions and follow-up actions. Studio runs one configured Action per request. Echo is supplied by the separate `ha-ai-studio-actions-core` Git repository. Existing bundled Echo instances keep their compatibility runtime and saved state. There is no AI model or workflow builder in this release.
+For installation and Device setup, start with the [getting-started guide](../README.md). This reference covers direct MQTT requests and Home Assistant automation examples. Studio also schedules independent measurements for configured Devices; Home Assistant owns automation conditions and follow-up actions.
 
 ## Setup
 
 1. Open **Settings** and add a broker. A Home Assistant broker appears as default only when Supervisor discovery succeeds. Local development can use these manual brokers or an optional `.env` broker.
-2. In **Settings → Action repositories**, add the public HTTPS Git clone URL for `ha-ai-studio-actions-core` and a branch, tag or commit. Wait for the repository status to become **Ready**.
+2. In **Settings → Action repositories**, add `https://github.com/ha-ai-studio/ha-ai-studio-actions-core` as a **Git** source with ref `main`, or choose a specific tag or commit. Wait for the repository status to become **Ready**.
 3. Choose **Create action**, enter a name and select **Echo**. Wait for its Python environment to become **Ready** before activation. Echo needs no third-party dependencies.
 4. In **Input**, choose a broker and concrete request topic. In **Output**, keep **Same as input** or select another broker and set a different result topic.
 5. In **General**, set the name and **Active** checkbox. **Save** persists both settings and activation state together. Clearing Active and saving closes the subscription and discards queued messages.
 6. Open **Message schemas** for the input and output contracts. Use **Test in Home Assistant** for a copyable MQTT test automation.
 7. Send requests from Home Assistant; open **Live activity** from the Actions table to follow incoming requests, processing and outgoing responses.
 
-Repository refresh changes the catalog for new instances only; existing instances stay pinned to their original commit. Local sources and private Git credentials are unsupported. Git action draft preview is unavailable. Only install trusted repositories: a venv isolates dependencies, not filesystem or network access.
+Repository updates change the catalog without changing existing instances. To upgrade an instance, use **Version → Apply version**; see the [version reference](../docs/DEVICES.md#action-repository-versions). Local directory sources are available on explicitly configured development servers. Preview controls depend on the plugin. Only install trusted repositories: a venv isolates dependencies, not filesystem or network access.
 
-Connections require MQTT v5. The subscriber uses Retain As Published so both live retained requests and retained replay are ignored. The broker connection test checks connection/authentication without publishing; it does not prove all topic ACLs. Active Actions need subscribe permission on their request topic and publish permission for results and diagnostics. The app keeps existing diagnostic discovery IDs on the input broker.
+Connections require MQTT v5. The subscriber uses Retain As Published so both live retained requests and retained replay are ignored. The broker connection test checks connection/authentication without publishing; it does not prove all topic ACLs. Active Actions need subscribe permission on their request topic and publish permission on their result topic. Device publication uses the separately selected Discovery broker.
 
 Input topics cannot be shared by active Actions on the same configured endpoint. Direct and multi-Action routing cycles are rejected, including when editing broker endpoints. Canonical host/port comparison cannot identify every DNS alias or external bridge; top-level result envelopes containing `status` are therefore ignored at the request boundary as an additional loop safeguard.
 
@@ -133,11 +133,11 @@ Delete stops an Action and removes it from the active table; private files and i
 
 In **Settings**, edit the broker used by Home Assistant. In its side panel, check **Enable MQTT Discovery**, and choose **Save broker**. New brokers can enable discovery in the same panel. Discovery is off initially and never enabled automatically. Only one broker can provide discovery at a time; enabling it on another broker moves discovery after cleanup. The broker table shows whether discovery is enabled. Discovery settings are also available for read-only Supervisor and environment brokers. **Save broker** saves connection and discovery settings together. If discovery validation fails after the connection was saved, the panel stays open and explicitly reports that partial result so you can correct and retry. This connection is independent of Action Input and Output and can run with no Actions. Use **Refresh status** to check publication or pending cleanup. Advanced topics default to discovery prefix `homeassistant` and HA status topic `homeassistant/status`.
 
-The Studio device exposes its active Action count. Each supported configured Action exposes execution and MQTT delivery diagnostics and links to the Studio device. Disabled Actions remain visible as `disabled`. Execution can be `idle`, `running`, `success`, `error` or `interrupted`; delivery can be `not_sent`, `pending`, `published`, `failed` or `unknown` after an interrupted delivery. `published` means broker acknowledgement, not recipient processing. Very short intermediate states may occur between diagnostic refreshes. Draft tests never change these production diagnostics.
+Discovery publishes only Devices with **Publish this device to Home Assistant** enabled. It includes their sensors, configured function buttons and diagnostics. Actions and Studio itself are not advertised as separate devices. Disabled Devices retain diagnostic states and their last accepted readings.
 
-MQTT Discovery creates devices and entities, **not a native HA action or generated input form**. Continue to use `mqtt.publish` and correlate result messages by `request_id`, as in the automation example above. Discovery does not execute Actions.
+Function buttons invoke the selected Action and update only its sensors on that Device. Direct MQTT callers continue to use `mqtt.publish` and correlate results by `request_id`. See the [Device reference](../docs/DEVICES.md#device-functions).
 
-Names can change without changing stored identifiers. Existing Action status identifiers and the installation identity are reused. New Action identifiers derive from installation namespace and Action ID. Unsupported legacy records are not advertised. A legacy Action sharing the installation device identity remains on that device rather than creating a duplicate.
+Names can change without changing stored Device and sensor identifiers. Previously owned legacy Action/Studio discovery topics are cleaned up; preserve the installation identity and ownership records during upgrades.
 
 On deletion, disabling discovery, broker switch or prefix change, Studio clears only its recorded configuration, diagnostic and availability topics. Historical HA statistics and unrelated topics are not deleted. Keep the old broker reachable: pending cleanup persists across restarts and completes before new announcements. Brokers needed by cleanup cannot be deleted or have their endpoint changed. Disable discovery, clear its broker selection, save, and wait for cleanup before deleting a broker. Credentials needed for cleanup are retained privately in the broker registry, including Supervisor connections; they are never returned to the browser. Rotated credentials can be updated on a matching manual broker endpoint.
 
@@ -166,7 +166,7 @@ Active Actions use their active configuration; inactive Actions show a draft exa
 
 On first start, Studio creates a random installation namespace and persists its `instance_id` in `/data/identity.json`. Restarts and upgrades using the same data directory keep this ID. Existing installations adopt their current namespace without changing MQTT topics or Discovery unique IDs.
 
-Discovery device names include the complete instance ID: `HA AI Studio · studio_<id>`. Action devices include both the instance ID and action name, and link to their parent Studio device. Independently initialized data directories produce distinct MQTT namespaces, entity unique IDs and device identifiers, even when actions have identical names. The Discovery status API also returns `instance_id`.
+Device and sensor identifiers remain stable across restarts and renames. Independently initialized data directories have separate installation identities. Only explicitly published virtual Devices are advertised; there is no parent Studio device or separate Action device.
 
 Use a separate persistent data directory for each installation. Restoring or copying an entire data directory preserves the identity; a clone is not a new installation and must not run alongside its original against the same broker. For a new instance, start with an empty data directory. Discovery remains opt-in.
 
@@ -174,7 +174,7 @@ Use a separate persistent data directory for each installation. Restoring or cop
 
 The **General** section contains Name and Active. **Save** persists configuration and the selected Active state together. Checking Active validates the broker routes and activates the saved configuration. Clearing Active and saving stops the subscription; failed saves leave the prior configuration/state intact. Unsaved checkbox changes do not affect MQTT.
 
-**AI Activity** displays the editor supplied by the selected plugin. **Message schemas** opens a side panel from the editor toolbar. The local Test action UI is no longer shown; use **Test in Home Assistant** for the MQTT test automation. The isolated backend test endpoint remains available for automated checks.
+The type-specific settings display the editor supplied by the selected plugin. Plugins may provide draft preview controls; camera tests can control real configured devices. **Message schemas** opens a side panel from the editor toolbar. Use **Test in Home Assistant** for the MQTT test automation.
 
 ## Live activity
 

@@ -1,138 +1,122 @@
-# HA AI Studio — Devices and Actions
+# HA AI Studio
 
-HA AI Studio runs configured Actions and uses them to update virtual Devices. Each Device can publish multiple named measurements to Home Assistant through MQTT Discovery and refresh them on an interval. Home Assistant retains long-term history and owns follow-up automations. No workflow chains or template mapping engine are included.
+**Extend Home Assistant with AI Actions and plugins.**
 
-Device configurations can be transferred as versioned JSON files: choose **Export template** in the Devices table, then **Import template** on the target installation. Exports use the saved draft and include sensor definitions (including derived rates), configured functions and the measurement interval. Each referenced Action becomes a portable slot; explicitly assign an existing compatible Action to each slot during import. Review reading IDs in the new Device before activation. Imports always create a new identity, remain inactive and disable Home Assistant publication. Action settings, broker credentials, assets, readings, request history and runtime state are excluded. Device and sensor labels are included. Version 1 accepts files up to 80 KB in the UI.
+HA AI Studio brings plugin-provided AI capabilities into your smart home. Install a plugin, configure an Action for your setup, and use its results in Home Assistant dashboards and automations. Studio handles configuration, execution and the connection to Home Assistant; each plugin supplies the processing logic and its settings editor.
 
+With the [AI-on-the-Edge Meters plugin](https://github.com/ha-ai-studio/ha-ai-studio-actions-ai-on-the-edge-meters), for example, a camera becomes a meter reader: local image recognition turns mechanical digits and dials into readings you can track in Home Assistant. The same plugin includes a separate history-based leak check.
 
-## Local development
+## What Studio brings to your smart home
 
-```sh
-docker compose up -d --build
-```
+- **Add capabilities through plugins.** Install Action types from GitHub Releases or Git repositories and manage their versions in Studio.
+- **Run AI locally.** Actions execute on your Studio server. Plugins with local models, such as the meter reader, process images there without sending them to an external AI service. Each Action has its own Python environment for its dependencies.
+- **Make an Action fit your setup.** Create configured instances with their own settings. Plugins can provide dedicated editors, such as visual frame selection for meter recognition.
+- **Use AI results in Home Assistant.** Call Actions from automations over MQTT, or expose their readings and controls as sensors and buttons through virtual Devices.
+- **Run measurements regularly or on demand.** Schedule Device measurements or invoke a selected Action with a button. Home Assistant handles conditions, notifications and follow-up automations.
+- **Build and share your own plugins.** Package Python processing logic, settings, an optional custom editor and reusable Device templates with the [plugin contract](ha_ai_studio/app/action_types/README.md).
 
-Open http://localhost:8099. Add real MQTT brokers in **Settings**, then create an Action with a name and type. Edit Input broker/topic and Output broker/topic (default: Same as input). Under **General**, select **Active** and click **Save** to enable the production subscription. Clear **Active** and save to stop it. Changes remain local to the editor until saved. **Message schemas** opens a side panel; **Test in Home Assistant** provides a copyable MQTT test automation.
+A **plugin** supplies Action types. An **Action** is an instance configured for your camera, sensor or other input. A **Device** makes compatible Actions available as Home Assistant sensors and buttons. Plugins can combine AI-based recognition with conventional processing; available capabilities depend on the plugins you install. Local processing depends on the plugin: check its documentation for any external services it uses.
 
-Local state persists in private `.dev-data`, excluded from builds/packages. `.env` is optional: copy `.env.example` and supply `DEV_MQTT_HOST`, port, username, password and TLS to add a read-only broker. Recreate the container after changes. No HA API token is needed. Production discovers HA's MQTT service through Supervisor only when available; otherwise add a broker manually. MQTT v5 brokers are required. No simulation fallback exists.
+## Before you start
 
-Optional **Settings → edit broker → Enable MQTT Discovery** publishes only explicitly opted-in virtual Devices and their measurement/diagnostic sensors. Actions and Studio itself are not advertised as devices. Previously owned Action/Studio discovery topics are durably removed before new device publication. Input and Output remain independent.
+- **Home Assistant with Supervisor on amd64**, such as an amd64 Home Assistant OS installation. Studio is currently marked experimental.
+- An **MQTT v5 broker** connected to Home Assistant's MQTT integration for publishing Devices or exchanging Action requests.
+- Any inputs required by your chosen plugin, such as a Home Assistant camera entity for meter readings.
 
-The frontend design system, build layout and isolated browser checks are documented in [frontend development](ha_ai_studio/frontend/README.md). The production frontend is built inside Docker and served by the Python backend in the same container.
+## 1. Install HA AI Studio
 
-## Local Action development
+1. In Home Assistant, open **Settings → Apps → Install app → ⋮ → Repositories**.
+2. Add this repository:
 
-The development server also mounts `LOCAL_ACTIONS_DIR` read-only (default: the sibling `ha-ai-studio-actions-ai-on-the-edge-meters` directory). In Settings → Action repositories add a **Local directory** source with path `.`. Create an instance and edit its configuration. After changing source files, save/discard edits, deactivate the instance, and select **Reload from source**. Wait for its environment to become Ready before reactivating against an isolated test broker. No Git push is required. Local sources are enabled only on the explicitly configured development server.
+   ```text
+   https://github.com/ha-ai-studio/ha-ai-studio
+   ```
 
-Actions may include a trusted custom configuration editor via `"editor": "ui/editor.js"` in their manifest. See the [plugin contract](ha_ai_studio/app/action_types/README.md) for the editor interface, source limits and trust model. Local development still uses real MQTT; browser checks must use synthetic fixtures.
+3. Install **HA AI Studio**, start it and open its web interface through Home Assistant.
+4. Open Studio **Settings**. If the Home Assistant MQTT broker was discovered automatically, use it. Otherwise, add your broker and test the connection.
 
-The Edge-Meter repository also provides **Leak detection**, which reads a cumulative
-water sensor's HA history. It requires Studio 0.0.19 or newer. Configure its
-`leak-status` / `leak-reason` readings on a Device and optionally add an Execute
-function. Notifications and follow-up actions remain in Home Assistant.
-For cross-repository integration tests, set `STUDIO_LOCAL_ACTIONS_DIR` to the
-Edge-Meter repository root when running `scripts/test.sh`; gateway tests also run
-without that optional source checkout.
+## 2. Add an Action plugin
 
-## Install
+Open **Settings → Action repositories**, add a source and wait for its catalog to load.
 
-After the first successful container release, add `https://github.com/ha-ai-studio/ha-ai-studio` under **Settings → Apps → Install app → ⋮ → Repositories**, then install **HA AI Studio** and open its web UI through Ingress. This requires Home Assistant with Supervisor on amd64. The repository and GHCR package must be public for installation without registry credentials. The app is marked experimental. Action types are installed from Git repositories in Settings. Echo is maintained in the separate `ha-ai-studio-actions-core` repository; existing bundled Echo instances remain supported without automatic migration.
+| Repository | Source type | Use it for |
+| --- | --- | --- |
+| [AI-on-the-Edge Meters](https://github.com/ha-ai-studio/ha-ai-studio-actions-ai-on-the-edge-meters) | **GitHub Release**, version `latest` | Camera-based meter readings, serial numbers, water-meter Device templates and optional leak detection. |
+| [Actions Core](https://github.com/ha-ai-studio/ha-ai-studio-actions-core) | **Git**, ref `main` | Echo, a simple Action that returns the input data for testing MQTT connections. |
 
-Home Assistant pulls `ghcr.io/ha-ai-studio/ha-ai-studio:<version>` using the version in `ha_ai_studio/config.yaml`; it does not build the image on the device. Before the first successful tag workflow, that image does not exist. Repository metadata can become visible before a tag build finishes, so announce an update only after publication succeeds.
+Use the repository URL from the link when adding the source. Install only plugins you trust: Actions run code on the Studio server, and custom editors run in your browser.
 
-`python3 scripts/package.py` also creates an archive in `dist/`. To build that source locally inside HA instead of pulling the released image, extract `ha_ai_studio` into HA's local apps directory and remove the `image:` line from the extracted `config.yaml` before refreshing/installing. The source slug is `ha_ai_studio`; repository and local installations may have different full app IDs and data locations. Back up data before switching. Nothing is installed in live HA by local development commands.
+## 3. Configure an Action
 
-See [release instructions](docs/RELEASING.md).
+1. Open **Actions → Create action**, enter a name and choose a type from an installed plugin.
+2. Open the Action and wait for its environment to become **Ready**.
+3. Configure its type-specific settings. For the meter reader, select a camera, capture a reference image and define the reading frames. Follow the [meter reader's setup guide](https://github.com/ha-ai-studio/ha-ai-studio-actions-ai-on-the-edge-meters#2-add-a-reference-image).
+4. Test with the plugin's available controls, then **Save**.
 
-Existing Agents are shown as **Unsupported · Disabled**. Their files, identities and credentials remain intact; create a new Echo Action explicitly. They are not converted. Deletion removes an Action from the active registry and stops subscriptions but retains files and reserves its ID; there is no restore UI.
+For Device measurements, the Action must support an empty input and provide named readings. Its MQTT **Active** checkbox does not need to be enabled for Device use.
 
-See [the guide and HA automation examples](ha_ai_studio/DOCS.md), [plugin contract](ha_ai_studio/app/action_types/README.md) and [architecture](docs/ARCHITECTURE.md).
+To call an Action directly over MQTT instead, configure **Input** with a broker and request topic, and **Output** with a result topic. Select **Active** and save. **Message schemas** describes the payloads; **Test in Home Assistant** provides a copyable test automation.
 
-```sh
-./scripts/test.sh
-./scripts/test-ui.sh  # Frontend regressions; requires Node.js 22.21+; installs locked npm dependencies
-./scripts/test-mqtt.sh
-./scripts/test-mqtt-security.sh
-python3 -m unittest discover -s tests -p test_package.py -v
-./scripts/security-check.sh
-python3 scripts/package.py
-```
+## 4. Turn Action results into a Device
 
-The MQTT check uses three temporary isolated Mosquitto brokers, never personal credentials. For local subpath testing run `docker compose --profile ingress up -d` and open http://localhost:8100/api/hassio_ingress/dev-check/. This is not a live HA authentication test.
+Use a Device when you want to expose Action readings as sensors, schedule measurements or provide buttons in Home Assistant. Open the **Devices** page to begin.
 
-CI builds the amd64 image once, running the React regression tests and TypeScript checks in its frontend build stage, then shares it as a workflow artifact with seven parallel GitHub Actions matrix jobs: four Python test groups (assets/API/package, Git plugins, plugin releases and local plugins), MQTT, TLS/topic-permission and security. Each job has its own runner, logs and status; a failed suite does not cancel the others. Downloaded images are checked against the build job’s image ID. The final gate requires every suite to pass. Image artifacts are retained for seven days; rerunning failed jobs after expiry requires a full workflow rerun. For the same checks locally, run `docker compose build --quiet` followed by `python3 scripts/parallel_checks.py`. The local runner prints grouped logs and waits for every check; any failure blocks publication. Release CI pushes the exact tested image only after all checks pass. Security checks have separate steps for secrets, Python dependencies, Grype database updates and image scanning. CI caches only the Grype database (with daily cache keys), keeps automatic updates and age/hash validation enabled, and scans the downloaded image archive without exporting it again. Locally, `./scripts/security-check.sh` still runs every check; `SECURITY_GRYPE_CACHE_DIR` selects a cache directory and `SECURITY_IMAGE_ARCHIVE` optionally selects an existing image archive. `./scripts/test.sh` still builds by default; `--skip-build` uses the existing image. `STUDIO_TEST_GROUP=core|plugins|releases|local` selects one Python group; the default `all` runs every test. New test modules automatically join the core group unless assigned elsewhere in `scripts/unit_checks.py`.
+1. Select **Create Device**, enter a name and optionally choose a plugin-provided Device template.
+2. Assign the template's Actions, or use **Add sensor** to select an Action and one of its named readings.
+3. Set each sensor's unit. For a cumulative water reading, use `m³`, enable the cumulative counter option and set the Home Assistant device class to `water`.
+4. Set the measurement interval. Add a function if you want a button such as **Read Now**: give it a name and select the Action it should execute.
+5. Select **Active** and **Save**. Use **Read now** to check the saved configuration immediately.
 
-Action plugins can also provide Device templates in a repository-level `device_templates/` folder beside `actions/`. Choose **Create Device → Device template** to select one and assign its Action slots. Templates are validated on repository refresh and never activate or publish a Device automatically. See the [plugin template contract](ha_ai_studio/app/action_types/README.md#plugin-device-templates) for the JSON format and packaging rules.
+A Device can combine readings from several Actions. Each measurement invokes the Actions needed by its sensors. A configured function runs only its selected Action and updates that Action's sensors without resetting the measurement schedule.
 
-## Action repository versions
+To derive flow rate from a cumulative reading, add a **Rate of change** sensor. For a source in m³, choose factor **1000**, time base **Per minute** and unit **L/min**. The first reading establishes a baseline; subsequent readings produce the average flow over the interval.
 
-Git and GitHub Release sources are checked at startup and every 15 minutes. **Check for updates** also runs a metadata-only check. Git follows the configured ref; a fixed commit stays pinned. Release sources follow `latest` or their configured stable release tag.
+## 5. Publish the Device to Home Assistant
 
-**Update** downloads and validates a separate immutable snapshot. Existing instances keep their selected version. **Version history** lists downloaded action types and versions with release or commit links where supported. Previous snapshots remain available, including versions never used by an instance. Existing catalogs and still-present historical instance snapshots are recovered; previously deleted snapshots cannot be reconstructed automatically.
+1. In Studio **Settings**, edit the intended broker and enable **MQTT Discovery**. Use the broker connected to Home Assistant.
+2. On the Device, enable **Publish this device to Home Assistant** and save.
+3. Open Home Assistant's **MQTT integration** to find the Device and add its entities to a dashboard.
 
-In an Action's **General** card, select **Version**, then **Apply version** to upgrade or downgrade. Save or discard configuration edits first. The Action must be inactive and idle, and devices using it must be inactive. Saved draft settings must pass the target schema. Studio preserves identity, settings, request history and cached results, then prepares a separate instance environment; wait for **Ready** before activation. If environment setup fails, the selected version remains saved and execution is blocked until the environment is rebuilt or another version is selected.
+Publication includes the Device's sensors, configured function buttons and diagnostic states. You can use those entities in Home Assistant automations just like other sensors and buttons.
 
-**Update all actions** previews current and target versions for instances from that repository. Blocked instances prevent the batch; applying rechecks the previewed bindings and commits the bindings together before building environments. It does not activate Actions. A new repository update arriving after preview does not change its pinned targets.
+## Update Actions
 
-Local development sources keep **Reload from source** on the Action. It captures current filesystem contents as an immutable snapshot; execution never follows working-directory edits. A failed initial local import can be retried in Settings.
+Studio checks Git and GitHub Release sources for updates automatically. You can also use **Check for updates** in **Settings → Action repositories**.
 
-## Repository layout
+**Update** downloads a new version into the catalog; existing Actions keep their selected version. To change an instance:
 
-- `ha_ai_studio/`: installable HA app, Python runtime, React/TypeScript/SCSS frontend, dependency locks and user guide.
-- `ha_ai_studio/app/action_types/`: explicitly registered Action plugins; currently Echo only.
-- `tests/`: unit/API checks and isolated MQTT integration checks.
-- `scripts/`: test runners, local Ingress proxy and source packaging.
-- `docs/`: architecture and verification report.
+1. Save or discard its edits, deactivate Devices using it, and deactivate the Action's MQTT route if enabled. Wait for running work to finish.
+2. In the Action's **General** card, choose **Version → Apply version**.
+3. Wait for **Ready**, review the configuration and reactivate the Devices or MQTT route you use.
 
-`requirements.txt` lists direct dependencies; `requirements.lock.txt` pins the complete runtime environment used by Docker. Keep both when updating dependencies. The app directory is `ha_ai_studio/`, the Compose service is `studio`, and the development image is `ha-ai-studio:dev`.
+**Update all actions** previews a repository-wide update before applying it. See the [version reference](docs/DEVICES.md#action-repository-versions) for requirements and recovery behavior.
 
-Generated archives, browser captures and local caches do not belong in the source tree. Keep private `.env` and `.dev-data/` out of source control and packages. The packager includes only approved app files and rejects symlinks.
+## Reuse a Device configuration
 
-## Naming migration
+Choose **Export template** in the Devices table and **Import template** on the target installation. Assign compatible Actions and review the sensor reading IDs before activation.
 
-This development copy uses the app slug `ha_ai_studio`, environment variables `HA_AI_STUDIO_DATA` and `HA_AI_STUDIO_DEV`, and request header `X-HA-AI-Studio-Request`. A changed app slug is a separate installation in Home Assistant: existing installations do not receive an automatic in-place upgrade. Back up and transfer app data explicitly before switching installations.
+Templates include sensor definitions, functions and the measurement interval. They exclude Action settings, credentials, images and measured values. Imported Devices start inactive and unpublished.
 
-Changing stored MQTT identities changes Discovery entities and request/result topics. Recreate copied HA test automations using the current topics. Preserve the Discovery ownership manifest and its cleanup credentials until the old retained topics have been removed. Do not run two copies against the same data directory or identities.
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| No Action types are available | Add an Action repository in Settings and check its status. |
+| Action environment is not Ready | Inspect its setup error and verify the selected plugin version and dependencies. |
+| Device does not measure | Check the Device's saved Active state, Action readiness and reading assignments. |
+| Sensor is unavailable | Inspect the Device's measurement log and the sensor's Status Message in Home Assistant. |
+| Rate sensor has no value | It needs two valid numeric source readings taken at different times. |
+| Device is missing from Home Assistant | Check the broker, MQTT Discovery and the Device's publication setting. |
+| MQTT request gets no response | Check the Action's Active state and Input/Output topics. Use QoS 1 and retain disabled; inspect **Live activity**. For a retry, reuse the same request ID and payload while its result is cached. |
+
+## Documentation
+
+- [Device and Action reference](docs/DEVICES.md): sensor behavior, scheduling, functions, templates and versions.
+- [MQTT guide and automation examples](ha_ai_studio/DOCS.md): request formats, results and Home Assistant test automations.
+- [Plugin contract](ha_ai_studio/app/action_types/README.md): build your own Actions, editors and Device templates.
+- [Local development](docs/DEVELOPMENT.md), [architecture](docs/ARCHITECTURE.md) and [release instructions](docs/RELEASING.md).
+- [Changelog](ha_ai_studio/CHANGELOG.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party notices are listed in [THIRD_PARTY.md](ha_ai_studio/THIRD_PARTY.md).
-
-## Automated checks
-
-GitHub Actions runs unit/API tests, isolated MQTT integration tests, TLS and publish-ACL checks, reproducible packaging checks, full-history and working-tree secret scans, Python dependency auditing, and container vulnerability scanning. Security scanner images and checkout are pinned to immutable identifiers. Python advisories and High/Critical container findings fail the checks; scanner failures also fail closed. The separate release workflow publishes a versioned GHCR image only when a `vMAJOR.MINOR.PATCH` tag is pushed. After the image push, it creates a GitHub Release with AI-assisted English notes and the maintained changelog (changelog fallback if OpenAI is unavailable). See [release setup](docs/RELEASING.md) for the `OPENAI_API_KEY` Actions secret. It never deploys to Home Assistant.
-
-The security check downloads public advisory databases and requires Internet access. All MQTT integration checks use disposable containers, generated test certificates and synthetic credentials. They never use `.env` or `.dev-data`.
-
-Actual Supervisor/Ingress authentication and install/upgrade acceptance still require a separate Home Assistant test installation. The local subpath proxy does not verify HA authentication. No live HA installation is changed by these scripts.
-
-The runtime uses the official Ubuntu 24.04 LTS container base, pinned by digest. Only Python, virtual-environment support and CA certificates are installed, without recommended packages. App dependencies live in `/opt/venv`; Ubuntu manages the system Python. Support remains limited to amd64.
-
-## Virtual devices
-
-Devices are the start page. Create a named Device without a preset device type, then compose it from up to 16 number or text readings. Each measurement selects an Action and a named reading; multiple measurements can share an Action. A device invokes each distinct Action once per update, serializes shared Action execution, and preserves successful measurements when another Action fails. Sensors have no predefined measurement type. Set a free unit, optionally mark a cumulative counter (value must not decrease), and optionally provide an HA `device_class` identifier in the Home Assistant metadata section. Studio treats this identifier as publication metadata and does not apply domain-specific rules. Counters use `total_increasing`; other numeric sensors use `measurement`. For HA water statistics, use unit `m³`, the counter option and HA metadata `water`.
-
-Configure the camera, illumination and other input sources in the Action settings. Camera tests and device runs set dimmable illumination to 100% for capture, then restore the prior brightness and on/off state. Restoration is journaled for retry after failures or restart; switches and on/off-only lights retain their on/off behavior. Device measurement Actions must accept an empty input object and return named readings in their successful result data:
-
-```json
-{"readings": [{"id": "main", "status": "read", "value": 123.456, "unit": "m³"}]}
-```
-
-The existing Analog Meter Reader uses this contract. The UI offers its configured meter names; other compatible Actions use their documented reading ID. Device execution never uses documentation example payloads. If an Action declares a `previous` input property, Studio supplies the device's last accepted values and elapsed time for those readings.
-
-**Save** applies the device settings and the **Active** checkbox together. Unchecked means automatic readings are disabled; checked means they are scheduled. Unsaved edits do not change running configuration. Saving an active device snapshots the selected Actions' active configurations (or their drafts when MQTT is inactive), including bound source versions. Actions do not need MQTT activation for Device use. Uncheck **Active** and save dependent devices before reloading a local Action source. Saved device bindings protect referenced private images. Deleting a referenced Action is blocked until its device references are removed.
-
-The device interval is 1–10080 minutes, measured from completion to the next update. Saving with **Active** checked schedules the next reading after one interval; **Read now** runs the active configuration immediately. Missed intervals produce at most one current measurement, never a catch-up queue. Interrupted work is recorded and not replayed; a fresh measurement is scheduled after the next interval. Readings accept finite numbers or nonblank text of up to 255 characters. Text is preserved exactly, including leading zeros; configure an empty unit and HA device class and disable numeric checks for text. Only numeric values receive a statistics state class and are passed back as previous numeric readings. A sensor cannot switch between number and text after its first accepted reading; use a new sensor ID to protect history. The device sensor owns the unit; Action output units are ignored and values are not converted. Cumulative counter values cannot decrease or be negative; optionally set a maximum change per reading. A meter replacement requires a new sensor ID. Removed sensor IDs retain their previous values and publication metadata/unit constraints to protect historical statistics if reused.
-
-Publication is a separate per-device opt-in and requires central Discovery to be enabled. Every published device has measurement, last-successful-reading timestamp and per-sensor status and Status Message diagnostic entities, plus device status. Status Message contains the specific reading failure (including shared alignment failures) and resets to “Reading successful.” after recovery. Home Assistant messages are limited to 255 characters; Studio retains the full error. No root Studio device or Action devices are advertised. A disabled device remains visible with disabled diagnostics and its last accepted values. Last values and exact owned MQTT topics persist across restart. Discovery configuration and state snapshots are retained and replayed after HA birth/reconnect; Action request/result envelopes remain QoS 1, retain off. Failed publication retries without rerunning the Action. MQTT delivery is not exactly-once.
-
-Deleting a device preserves its private stored record and queues exact-topic Discovery cleanup. Cleanup survives broker outages/restarts and must finish before broker/prefix migration; unrelated topics are never deleted. Home Assistant owns long-term statistics; Studio only keeps the latest accepted values and bounded Action execution records. Live HA authentication, actual HA entity registration and production TLS require separate integration validation.
-
-### Device functions
-
-In a Device, select **Add function**, enter a name and choose an Action. The function calls **Execute**. Functions are independent of sensors; a Device may contain sensors, functions, or both. No functions are created automatically. **Run function** uses the saved active configuration, executes only the selected Action, and updates this Device's sensors backed by that Action. Function-only Actions are never scheduled. A function call does not reset the sensor measurement schedule. Concurrent calls are rejected while the Device is measuring.
-
-Enable **Publish this device to Home Assistant** to register all configured functions automatically alongside its sensors. There is no separate per-function publication switch. Central Discovery must be enabled in Settings. Each function becomes a separate MQTT button on the existing HA Device. Its automatically generated Function ID (under **Advanced settings**) determines its unique ID; renaming the label preserves identity. Removing a function or publication durably cleans up its owned discovery configuration. Disabled Devices retain diagnostic entities and unavailable buttons, with no command subscriptions.
-
-Actions may declare `"functions": ["execute"]` in `action.json` (or `[]` to explicitly offer none). All trusted Actions implement `execute(data, settings)` and offer Execute by default; an explicit empty functions list opts out. Device activation requires that the Action accept an empty input object. Execute uses the saved settings. If sensors reference the Action, its result must provide their named values in a `readings` array. Functions without associated sensors may return any valid Action output. Existing snapshots and Action settings are preserved; no source reload is required to offer Execute.
-
-HA buttons send non-retained QoS 1 commands on the central Discovery broker with a per-press request ID. Studio rejects live and replayed retained commands and result envelopes, and checks current publication/activation before execution. It persists the request digest and bound configuration before starting. The most recent **256 function request IDs per Device** survive restart and are deduplicated; reusing a retained ID for a different function is rejected. Older IDs fall outside the deduplication window and must not be replayed. Interrupted calls are not automatically replayed. This is not an exactly-once delivery guarantee. Command topics are protected against Action-route and HA-birth overlaps. Request history and private binding snapshots are never included in browser responses or discovery payloads.
+MIT — see [LICENSE](LICENSE). Action plugins have their own licenses; check their repositories. Third-party notices for Studio are listed in [THIRD_PARTY.md](ha_ai_studio/THIRD_PARTY.md).

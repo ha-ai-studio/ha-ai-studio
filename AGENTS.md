@@ -47,3 +47,10 @@
 - Explicitly configured local sources are supported on the development server under `HA_AI_STUDIO_LOCAL_ACTIONS`; Compose mounts `LOCAL_ACTIONS_DIR` read-only. They use validated immutable snapshots and the same per-instance runner as Git sources.
 - Reload local sources only for inactive, idle instances. Preserve identities, settings and request history; retain historical snapshots. Do not silently follow working-directory edits during execution.
 - Trusted Actions may declare `editor: "ui/editor.js"`. Custom configuration editors edit draft settings inside the Action page; Studio still owns saving, schema validation, Input, Output and activation. Serve only UI assets from a bound snapshot; preserve relative imports under Ingress. Editors are trusted browser code, not a sandbox.
+
+## Git push policy
+
+- Never push autonomously. Push only when the user explicitly requests a push for the specific changes being pushed.
+- Permission to edit, commit, merge locally or prepare a release does not authorize a push.
+- A previous push request does not authorize pushing subsequent changes. Do not reuse earlier push authorization for follow-up edits.
+- After committing, stop locally and report the result. Do not push branches or tags, or use another tool to publish repository changes, without that explicit request.
