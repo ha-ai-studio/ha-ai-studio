@@ -518,11 +518,24 @@ tr:last-child td {
     min-width: 0;
   }
   .sensor-card-body {
-    padding: 12px 18px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 16px 20px 20px;
+
+    > .device-field-grid,
+    > p,
+    > .sensor-card-footer {
+      margin: 0;
+    }
+
+    > p {
+      line-height: 1.6;
+    }
   }
   .sensor-advanced {
     border-top: 1px solid var(--border);
-    padding-top: 10px;
+    padding-top: 16px;
     summary {
       font-size: 14px;
       color: var(--accent-hover);
