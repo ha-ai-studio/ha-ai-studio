@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { Button, Input, Notice, Select, SidePanel } from "../design-system";
 import { api } from "../lib/api";
 import { useOperation } from "../lib/hooks";
-import type { ActionState, DeviceTemplate } from "../lib/types";
+import type {
+  ActionState,
+  DeviceTemplate,
+  DeviceState,
+  PluginDeviceTemplate,
+} from "../lib/types";
 
 export async function exportDeviceTemplate(id: string) {
   const template = await api("device-template", undefined, id);
@@ -21,19 +26,30 @@ export async function exportDeviceTemplate(id: string) {
 export function ImportDeviceTemplate({
   close,
   open,
+  createDevice = false,
 }: {
+  createDevice?: boolean;
   close: () => void;
   open: (id: string) => void;
 }) {
+  const [catalog, setCatalog] = useState<PluginDeviceTemplate[]>([]);
+  const [selected, setSelected] = useState("");
   const [template, setTemplate] = useState<DeviceTemplate>();
   const [actions, setActions] = useState<ActionState[]>([]);
   const [assignments, setAssignments] = useState<Record<string, string>>({});
   const [name, setName] = useState("");
   const op = useOperation();
   useEffect(() => {
-    void op.run(async () =>
-      setActions((await api("actions")).actions.filter((a) => a.supported)),
-    );
+    void op.run(async () => {
+      const [availableActions, availableTemplates] = await Promise.all([
+        api("actions"),
+        createDevice
+          ? api("device-templates")
+          : Promise.resolve({ templates: [] }),
+      ]);
+      setActions(availableActions.actions.filter((a) => a.supported));
+      setCatalog(availableTemplates.templates);
+    });
   }, []);
   const entries = template
     ? [
@@ -44,7 +60,7 @@ export function ImportDeviceTemplate({
   const slots = [...new Set(entries.map((entry) => entry.action_id))];
   return (
     <SidePanel
-      title="Import Device template"
+      title={createDevice ? "Create Device" : "Import Device Template"}
       busy={op.busy}
       onClose={close}
       footer={
@@ -53,10 +69,13 @@ export function ImportDeviceTemplate({
           type="submit"
           variant="primary"
           disabled={
-            op.busy || !template || slots.some((slot) => !assignments[slot])
+            op.busy ||
+            !name.trim() ||
+            (!createDevice && !template) ||
+            slots.some((slot) => !assignments[slot])
           }
         >
-          Import device
+          {createDevice ? "Create Device" : "Import Device"}
         </Button>
       }
     >
@@ -65,52 +84,96 @@ export function ImportDeviceTemplate({
         onSubmit={(event) => {
           event.preventDefault();
           void op.run(async () => {
-            const device = await api("device-template-import", {
-              template,
-              name,
-              actions: assignments,
-            });
+            const device = template
+              ? await api("device-template-import", {
+                  template,
+                  name,
+                  actions: assignments,
+                })
+              : ((await api("devices", { name })) as unknown as DeviceState);
             open(device.id);
             close();
           });
         }}
       >
         <fieldset disabled={op.busy}>
-          <Input
-            label="Template file"
-            type="file"
-            accept=".json,application/json"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              setTemplate(undefined);
-              setAssignments({});
-              if (!file) return;
-              void op.run(async () => {
-                if (file.size > 80000)
-                  throw new Error(
-                    "Template file must be no larger than 80 KB.",
-                  );
-                let value: unknown;
-                try {
-                  value = JSON.parse(await file.text());
-                } catch {
-                  throw new Error("Template file must contain valid JSON.");
-                }
-                const result = await api("device-template-preview", value);
-                setTemplate(result);
-                setName(result.config.name);
-              });
-            }}
-          />
+          {createDevice && (
+            <Input
+              label="Device name"
+              required
+              maxLength={80}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          )}
+          {createDevice ? (
+            <>
+              <Select
+                label="Device template"
+                value={selected}
+                onChange={(event) => {
+                  const id = event.target.value;
+                  const entry = catalog.find((item) => item.id === id);
+                  setSelected(id);
+                  setTemplate(entry?.template);
+                  if (!name.trim() && entry)
+                    setName(entry.template.config.name);
+                  setAssignments({});
+                }}
+              >
+                <option value="">Start empty</option>
+                {catalog.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.template.config.name} · {entry.source} ({entry.ref})
+                  </option>
+                ))}
+              </Select>
+              {!op.busy && !catalog.length && !op.error && (
+                <Notice>
+                  No plugin templates available. Add or refresh an Action
+                  repository that includes Device templates in Settings.
+                </Notice>
+              )}
+            </>
+          ) : (
+            <Input
+              label="Template file"
+              type="file"
+              accept=".json,application/json"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                setTemplate(undefined);
+                setAssignments({});
+                if (!file) return;
+                void op.run(async () => {
+                  if (file.size > 80000)
+                    throw new Error(
+                      "Template file must be no larger than 80 KB.",
+                    );
+                  let value: unknown;
+                  try {
+                    value = JSON.parse(await file.text());
+                  } catch {
+                    throw new Error("Template file must contain valid JSON.");
+                  }
+                  const result = await api("device-template-preview", value);
+                  setTemplate(result);
+                  setName(result.config.name);
+                });
+              }}
+            />
+          )}
           {template && (
             <>
-              <Input
-                label="Device name"
-                required
-                maxLength={80}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
+              {!createDevice && (
+                <Input
+                  label="Device name"
+                  required
+                  maxLength={80}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              )}
               <p>
                 {template.config.sensors.length} sensors ·{" "}
                 {template.config.functions?.length || 0} functions · Every{" "}

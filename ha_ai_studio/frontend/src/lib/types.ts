@@ -145,6 +145,7 @@ export interface DeviceTemplate {
 }
 
 export interface ApiResponses {
+  "device-templates": { templates: PluginDeviceTemplate[] };
   "device-template": DeviceTemplate;
   "device-template-preview": DeviceTemplate;
   "device-template-import": DeviceState;
@@ -226,4 +227,13 @@ export interface DeviceState {
       error?: string;
     }
   >;
+}
+
+export interface PluginDeviceTemplate {
+  id: string;
+  repository_id: string;
+  source: string;
+  ref: string;
+  snapshot: string;
+  template: DeviceTemplate;
 }

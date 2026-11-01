@@ -46,6 +46,79 @@ def identifier(value):
     return isinstance(value, str) and re.fullmatch('[a-z][a-z0-9-]{0,47}', value)
 
 
+def validate_config(config, studio=None, *, template=False):
+    config = copy.deepcopy(config)
+    if isinstance(config, dict):config.setdefault('functions', [])
+    if not isinstance(config, dict) or set(config) != {'name', 'interval_minutes', 'publish', 'sensors', 'functions'}:
+        raise Invalid('Provide the complete device configuration.')
+    if not name(config['name']):
+        raise Invalid('Invalid device name.')
+    if type(config['interval_minutes']) is not int or not 1 <= config['interval_minutes'] <= 10080:
+        raise Invalid('Update interval must be 1–10080 whole minutes.')
+    if type(config['publish']) is not bool or not isinstance(config['sensors'], list) or len(config['sensors']) > 16:
+        raise Invalid('Provide publication and up to 16 sensors.')
+    ids = set()
+    for sensor in config['sensors']:
+        if not isinstance(sensor, dict) or set(sensor) not in ({'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change'}, {'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change', 'rate'}):
+            raise Invalid('Provide the complete sensor definition.')
+        if not identifier(sensor['id']) or sensor['id'] in ids or not name(sensor['name']):
+            raise Invalid('Sensor IDs must be unique lowercase names; provide a sensor name.')
+        ids.add(sensor['id'])
+        if 'rate' not in sensor and not identifier(sensor['reading']):
+            raise Invalid('Select a named action reading.')
+        if type(sensor['cumulative']) is not bool:
+            raise Invalid('Specify whether this is a cumulative counter.')
+        if not isinstance(sensor['device_class'], str) or (sensor['device_class'] and not re.fullmatch('[a-z][a-z0-9_]{0,63}', sensor['device_class'])):
+            raise Invalid('Use a Home Assistant device class identifier or leave it empty.')
+        if not isinstance(sensor['unit'], str) or len(sensor['unit']) > 24 or any(ord(c) < 32 for c in sensor['unit']):
+            raise Invalid('Use a unit of up to 24 characters.')
+        maximum = sensor['max_change']
+        if maximum is not None and (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum <= 0):
+            raise Invalid('Maximum change must be a positive finite number or empty.')
+        if 'rate' in sensor:
+            rate = sensor['rate']
+            if not isinstance(rate, dict) or set(rate) != {'source', 'factor', 'time_base'}:
+                raise Invalid('Provide the source, conversion factor and time base for the rate.')
+            if not identifier(rate['source']):raise Invalid('Select a source sensor.')
+            if type(rate['factor']) not in (int, float) or not math.isfinite(rate['factor']) or rate['factor'] <= 0:
+                raise Invalid('Conversion factor must be a positive finite number.')
+            if type(rate['time_base']) is not str or rate['time_base'] not in ('second', 'minute', 'hour'):
+                raise Invalid('Select second, minute or hour as the time base.')
+            if sensor['action_id'] != '' or sensor['reading'] != '' or sensor['cumulative']:
+                raise Invalid('Rate sensors cannot have an Action reading or be cumulative counters.')
+            continue
+        if template:
+            if not identifier(sensor['action_id']):raise Invalid('Invalid template Action slot.')
+            continue
+        action = studio.get(sensor['action_id'])
+        if not action.supported:
+            raise Invalid('Select a supported action.')
+    by_id = {s['id']: s for s in config['sensors']}
+    for sensor in config['sensors']:
+        if 'rate' not in sensor:continue
+        source = by_id.get(sensor['rate']['source'])
+        if source is None or 'rate' in source or source['id'] == sensor['id']:
+            raise Invalid('Rate source must be an Action sensor in this device; derived sources and cycles are not supported.')
+    if not isinstance(config['functions'], list) or len(config['functions']) > 16:
+        raise Invalid('Provide up to 16 functions.')
+    ids = set()
+    for function in config['functions']:
+        if not isinstance(function, dict) or set(function) != {'id', 'name', 'action_id', 'function'}:
+            raise Invalid('Provide the complete function definition.')
+        if not identifier(function['id']) or function['id'] in ids or not name(function['name']):
+            raise Invalid('Function IDs must be unique lowercase names; provide a function name.')
+        ids.add(function['id'])
+        if template:
+            if not identifier(function['action_id']) or function['function'] != 'execute':
+                raise Invalid('Invalid template function or Action slot.')
+            continue
+        action = studio.get(function['action_id'])
+        from .plugins import device_functions
+        if not action.supported or function['function'] != 'execute' or 'execute' not in device_functions(action.plugin.metadata):
+            raise Invalid('Select an action that supports the Execute function.')
+    return config
+
+
 class Devices:
     def __init__(self, studio):
         self.studio = studio
@@ -142,13 +215,14 @@ class Devices:
             entry['action_id'] = bindings[action_id]
         return {'format': 'ha-ai-studio-device-template', 'version': 1, 'config': config}
 
-    def template_config(self, value):
+    @staticmethod
+    def template_config(value):
         if not isinstance(value, dict) or set(value) != {'format', 'version', 'config'}:
             raise Invalid('Provide a Device template file.')
         if value['format'] != 'ha-ai-studio-device-template' or type(value['version']) is not int or value['version'] != 1:
             raise Invalid('Unsupported Device template format or version.')
         # Validate the portable structure without requiring installation-specific Actions.
-        config = self.validate(value['config'], template=True)
+        config = validate_config(value['config'], template=True)
         if config['publish']:
             raise Invalid('Device templates must have publication disabled.')
         return config
@@ -168,76 +242,7 @@ class Devices:
         return self.create_config(self.validate(config))
 
     def validate(self, config, *, template=False):
-        config = copy.deepcopy(config)
-        if isinstance(config, dict):config.setdefault('functions', [])
-        if not isinstance(config, dict) or set(config) != {'name', 'interval_minutes', 'publish', 'sensors', 'functions'}:
-            raise Invalid('Provide the complete device configuration.')
-        if not name(config['name']):
-            raise Invalid('Invalid device name.')
-        if type(config['interval_minutes']) is not int or not 1 <= config['interval_minutes'] <= 10080:
-            raise Invalid('Update interval must be 1–10080 whole minutes.')
-        if type(config['publish']) is not bool or not isinstance(config['sensors'], list) or len(config['sensors']) > 16:
-            raise Invalid('Provide publication and up to 16 sensors.')
-        ids = set()
-        for sensor in config['sensors']:
-            if not isinstance(sensor, dict) or set(sensor) not in ({'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change'}, {'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change', 'rate'}):
-                raise Invalid('Provide the complete sensor definition.')
-            if not identifier(sensor['id']) or sensor['id'] in ids or not name(sensor['name']):
-                raise Invalid('Sensor IDs must be unique lowercase names; provide a sensor name.')
-            ids.add(sensor['id'])
-            if 'rate' not in sensor and not identifier(sensor['reading']):
-                raise Invalid('Select a named action reading.')
-            if type(sensor['cumulative']) is not bool:
-                raise Invalid('Specify whether this is a cumulative counter.')
-            if not isinstance(sensor['device_class'], str) or (sensor['device_class'] and not re.fullmatch('[a-z][a-z0-9_]{0,63}', sensor['device_class'])):
-                raise Invalid('Use a Home Assistant device class identifier or leave it empty.')
-            if not isinstance(sensor['unit'], str) or len(sensor['unit']) > 24 or any(ord(c) < 32 for c in sensor['unit']):
-                raise Invalid('Use a unit of up to 24 characters.')
-            maximum = sensor['max_change']
-            if maximum is not None and (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum <= 0):
-                raise Invalid('Maximum change must be a positive finite number or empty.')
-            if 'rate' in sensor:
-                rate = sensor['rate']
-                if not isinstance(rate, dict) or set(rate) != {'source', 'factor', 'time_base'}:
-                    raise Invalid('Provide the source, conversion factor and time base for the rate.')
-                if not identifier(rate['source']):raise Invalid('Select a source sensor.')
-                if type(rate['factor']) not in (int, float) or not math.isfinite(rate['factor']) or rate['factor'] <= 0:
-                    raise Invalid('Conversion factor must be a positive finite number.')
-                if type(rate['time_base']) is not str or rate['time_base'] not in ('second', 'minute', 'hour'):
-                    raise Invalid('Select second, minute or hour as the time base.')
-                if sensor['action_id'] != '' or sensor['reading'] != '' or sensor['cumulative']:
-                    raise Invalid('Rate sensors cannot have an Action reading or be cumulative counters.')
-                continue
-            if template:
-                if not identifier(sensor['action_id']):raise Invalid('Invalid template Action slot.')
-                continue
-            action = self.studio.get(sensor['action_id'])
-            if not action.supported:
-                raise Invalid('Select a supported action.')
-        by_id = {s['id']: s for s in config['sensors']}
-        for sensor in config['sensors']:
-            if 'rate' not in sensor:continue
-            source = by_id.get(sensor['rate']['source'])
-            if source is None or 'rate' in source or source['id'] == sensor['id']:
-                raise Invalid('Rate source must be an Action sensor in this device; derived sources and cycles are not supported.')
-        if not isinstance(config['functions'], list) or len(config['functions']) > 16:
-            raise Invalid('Provide up to 16 functions.')
-        ids = set()
-        for function in config['functions']:
-            if not isinstance(function, dict) or set(function) != {'id', 'name', 'action_id', 'function'}:
-                raise Invalid('Provide the complete function definition.')
-            if not identifier(function['id']) or function['id'] in ids or not name(function['name']):
-                raise Invalid('Function IDs must be unique lowercase names; provide a function name.')
-            ids.add(function['id'])
-            if template:
-                if not identifier(function['action_id']) or function['function'] != 'execute':
-                    raise Invalid('Invalid template function or Action slot.')
-                continue
-            action = self.studio.get(function['action_id'])
-            from .plugins import device_functions
-            if not action.supported or function['function'] != 'execute' or 'execute' not in device_functions(action.plugin.metadata):
-                raise Invalid('Select an action that supports the Execute function.')
-        return config
+        return validate_config(config, self.studio, template=template)
 
     async def save(self, id, value):
         self.get(id)

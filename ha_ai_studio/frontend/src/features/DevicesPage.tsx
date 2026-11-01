@@ -9,7 +9,6 @@ import {
   LogView,
   Notice,
   Select,
-  SidePanel,
   Status,
 } from "../design-system";
 import { api, errorText } from "../lib/api";
@@ -32,7 +31,6 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
   const [error, setError] = useState("");
   const [create, setCreate] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [name, setName] = useState("");
   const [remove, setRemove] = useState<DeviceState>();
   const op = useOperation();
   async function refresh(signal?: AbortSignal) {
@@ -64,9 +62,11 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
           </p>
         </div>
         <div className="actions">
-          <Button onClick={() => setImporting(true)}>Import template</Button>
+          <Button onClick={() => setImporting(true)}>
+            Import Device Template
+          </Button>
           <Button variant="primary" onClick={() => setCreate(true)}>
-            Create device
+            Create Device
           </Button>
         </div>
       </div>
@@ -133,46 +133,11 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
         <ImportDeviceTemplate close={() => setImporting(false)} open={open} />
       )}
       {create && (
-        <SidePanel
-          title="Create device"
-          busy={op.busy}
-          onClose={() => setCreate(false)}
-          footer={
-            <Button
-              form="create-device"
-              type="submit"
-              variant="primary"
-              disabled={op.busy}
-            >
-              Create device
-            </Button>
-          }
-        >
-          <form
-            id="create-device"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void op.run(async () => {
-                const result = (await api("devices", {
-                  name,
-                })) as unknown as DeviceState;
-                setCreate(false);
-                open(result.id);
-              });
-            }}
-          >
-            <fieldset disabled={op.busy}>
-              <Input
-                label="Name"
-                required
-                maxLength={80}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </fieldset>
-            <Notice error>{op.error}</Notice>
-          </form>
-        </SidePanel>
+        <ImportDeviceTemplate
+          createDevice
+          close={() => setCreate(false)}
+          open={open}
+        />
       )}
       {remove && (
         <ConfirmDelete

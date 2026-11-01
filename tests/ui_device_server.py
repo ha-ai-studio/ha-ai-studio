@@ -31,7 +31,7 @@ async def make_app():
     (source/'ui'/'fields.js').write_text('export const label = "Synthetic editor relative import loaded";')
     (source/'ui'/'editor.js').write_text('import {label} from "./fields.js"; export function render(host, settings) { const p=document.createElement("p"); p.textContent=label; host.append(p); return () => settings; }')
     record={'type':'git-ui-reader','repository_id':'ui','commit':'a'*40,'snapshot':'ui-fixture','directory':'actions/reader','manifest':await manifest(source)}
-    studio.repositories.state={'repositories':[{'id':'ui','url':'https://example.invalid','ref':'main','status':'Ready','actions':[record],'logs':[]}]}
+    studio.repositories.state={'repositories':[{'id':'ui','url':'https://example.invalid','ref':'main','status':'Ready','actions':[record],'logs':[], 'template_snapshot':'ui-fixture', 'device_templates':[{'id':'water-meter','template':{'format':'ha-ai-studio-device-template','version':1,'config':{'name':'Water meter','interval_minutes':30,'publish':False,'sensors':[{'id':'water','name':'Water','device_class':'water','cumulative':True,'unit':'m³','action_id':'reader','reading':'main','max_change':None}], 'functions':[{'id':'read','name':'Read now','action_id':'reader','function':'execute'}]}}}]}]}
     for id,name,value,unit in [('water','Water reader',123.456,'m³'),('temperature','Temperature reader',20.5,'°C')]:
         await studio.create({'id':id,'name':name,'type':record['type']})
         action=studio.get(id);await action.environment.task

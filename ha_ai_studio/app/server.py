@@ -87,6 +87,8 @@ def create_app(root=None, dev=None):
             return web.json_response(read(studio.get(request.query.get('id')),request.query.get('run','')))
         if action=='ha-entities' and request.method=='GET':
             return web.json_response(await studio.home_assistant.search(request.query.get('domains','camera,light,switch').split(','),request.query.get('q','')))
+        if action == 'device-templates' and request.method == 'GET':
+            return web.json_response({'templates':studio.repositories.device_templates()})
         if action == 'device-template' and request.method == 'GET':
             return web.json_response(studio.devices.export_template(request.query.get('id')))
         if action == 'device-template-preview' and request.method == 'POST':

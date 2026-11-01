@@ -135,3 +135,70 @@ catalog; existing Actions keep their version and snapshots across refresh and
 restart. There is no automatic conversion of existing Git/local sources or in-place
 release upgrade. Failed refreshes preserve the previous catalog. GitHub network
 access and unauthenticated API rate limits apply; private releases are unsupported.
+
+## Plugin Device templates
+
+Repositories may include a separate `device_templates/` directory alongside
+`actions/`. Git sources, release ZIPs and explicitly configured local sources use
+the same contract:
+
+```text
+actions/example/action.json
+actions/example/action.py
+actions/example/requirements.lock
+device_templates/water-meter.json
+```
+
+Use the version 1 JSON produced by **Devices → Export template**. Each filename
+is a stable template ID: a lowercase letter followed by up to 47 lowercase
+letters, digits or hyphens, then `.json`. Include at most 64 files, each at most
+80,000 bytes. This directory contains only these JSON files, without nested
+folders or symlinks. No manifest change is required. A single-action local source
+may place `device_templates/` beside its `action.json`.
+
+For example:
+
+```json
+{
+  "format": "ha-ai-studio-device-template",
+  "version": 1,
+  "config": {
+    "name": "Water meter",
+    "interval_minutes": 30,
+    "publish": false,
+    "sensors": [{
+      "id": "water",
+      "name": "Water",
+      "device_class": "water",
+      "cumulative": true,
+      "unit": "m³",
+      "action_id": "reader",
+      "reading": "main",
+      "max_change": null
+    }],
+    "functions": [{
+      "id": "read",
+      "name": "Read now",
+      "action_id": "reader",
+      "function": "execute"
+    }]
+  }
+}
+```
+
+`action_id` values are portable slots, not installed Action IDs or Action types.
+Users choose **Create Device → Device template**, name the Device, select a template (or Start empty)
+and explicitly assign an existing Action to each slot. Function slots require an
+Action that supports Execute. Review reading IDs before activation; assigning an
+Action does not guarantee its output contains every requested reading.
+
+Synchronization validates all templates without executing plugin code and saves
+the catalog with the validated snapshot. Invalid templates reject the refresh;
+the previous catalog remains available. Local edits only appear after refresh.
+Template IDs are scoped by repository, so separate repositories can use the same
+filename. Successful refresh removes deleted templates from the choices; already
+created Devices retain their independent configuration. New Devices always get
+new identities, remain inactive and have Home Assistant publication disabled.
+
+Templates include labels and configuration. Only distribute intentionally public
+examples; never package private labels, credentials, images or runtime data.

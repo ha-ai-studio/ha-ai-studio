@@ -81,6 +81,8 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
         devices[0].enabled = false;
         devices[0].status = "disabled";
         result = devices[0];
+      } else if (endpoint === "device-templates") {
+        result = { templates: [] };
       } else if (endpoint === "delete-device") {
         devices.splice(0);
         result = { devices };
@@ -90,15 +92,18 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
   );
   render(<App />);
   await userEvent.click(
-    await screen.findByRole("button", { name: "Create device" }),
+    await screen.findByRole("button", { name: "Create Device" }),
   );
   const dialog = screen.getByRole("dialog");
   expect(
     within(dialog).queryByLabelText("Device type"),
   ).not.toBeInTheDocument();
-  await userEvent.type(within(dialog).getByLabelText("Name"), "Water meter");
+  await userEvent.type(
+    within(dialog).getByLabelText("Device name"),
+    "Water meter",
+  );
   await userEvent.click(
-    within(dialog).getByRole("button", { name: "Create device" }),
+    within(dialog).getByRole("button", { name: "Create Device" }),
   );
   await userEvent.click(
     await screen.findByRole("button", { name: "Add sensor" }),
@@ -200,7 +205,9 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
   await screen.findByText("Settings saved. Device is inactive.");
   await waitFor(() => expect(devices[0].enabled).toBe(false));
   await userEvent.click(screen.getByRole("button", { name: "← Devices" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Delete Water meter updated" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Delete Water meter updated" }),
+  );
   await userEvent.click(
     within(screen.getByRole("dialog")).getByRole("button", {
       name: "Delete device",
@@ -211,6 +218,7 @@ it("creates a device, assigns independent actions, saves the Active checkbox ato
     requests.every((path) =>
       [
         "devices",
+        "device-templates",
         "actions",
         "device",
         "device-read",

@@ -158,6 +158,29 @@ async def manifest(root):
     except Invalid:raise
     except Exception:raise Invalid('Invalid action manifest.') from None
 
+def device_templates(root, *, local=False):
+    """Read portable JSON only; never execute plugin code or follow external paths."""
+    from .devices import Devices
+    folder = root / 'device_templates'
+    if folder.is_symlink():raise Invalid('Invalid device_templates directory.')
+    if not folder.exists():return []
+    if not folder.is_dir():raise Invalid('Invalid device_templates directory.')
+    files = sorted(p for p in folder.iterdir() if not (local and p.name.startswith('.')))
+    if len(files) > 64:raise Invalid('Maximum of 64 Device templates per repository.')
+    result = []
+    for path in files:
+        if path.is_symlink() or not path.is_file() or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}\.json', path.name):
+            raise Invalid('Device templates must be JSON files with unique lowercase names.')
+        if path.stat().st_size > 80000:raise Invalid('Device template exceeds 80 KB.')
+        try:
+            value = json.loads(path.read_text())
+            config = Devices.template_config(value)
+        except Exception:
+            raise Invalid('Invalid Device template.') from None
+        result.append({'id':path.stem,'template':{'format':value['format'],'version':value['version'],'config':config}})
+    return result
+
+
 def device_functions(metadata):
     # Every trusted Action implements execute(data, settings). An explicit empty
     # list may opt out; activation still validates the empty-input contract.
@@ -300,6 +323,11 @@ class Repositories:
         return value
     def types(self):
         return {r['type']:GitPlugin(r,self.store.root/'sources'/r['snapshot']/r['directory']) for repo in self.state['repositories'] for r in repo['actions']}
+    def device_templates(self):
+        return [{'id':f"{repo['id']}:{entry['id']}", 'repository_id':repo['id'],
+                 'source':repo['url'], 'ref':repo['ref'], 'snapshot':repo.get('template_snapshot'),
+                 **copy.deepcopy({k:v for k,v in entry.items() if k != 'id'})}
+                for repo in self.state['repositories'] for entry in repo.get('device_templates', [])]
     def bound(self,record):return GitPlugin(record,self.store.root/'sources'/record['snapshot']/record['directory'])
     def local_source(self,relative):
         if self.local_root is None:raise Invalid('Local action sources are not enabled on this server.')
@@ -349,6 +377,7 @@ class Repositories:
             destination.mkdir(parents=True)
             for current,dirs,files in os.walk(directory,followlinks=False):
                 dirs[:]=sorted(d for d in dirs if not d.startswith('.') and d not in ('__pycache__','node_modules','venv','environments'))
+                if base==source and Path(current)==directory and 'device_templates' in dirs:dirs.remove('device_templates')
                 for name in dirs+files:
                     if (Path(current)/name).is_symlink():raise Invalid('Local source symlinks are unsupported.')
                 for name in sorted(files):
@@ -363,6 +392,17 @@ class Repositories:
                     if len(data)>5*1024*1024:raise Invalid('Local action file is too large.')
                     output.write_bytes(data)
                     digest.update(str(output.relative_to(target)).encode());digest.update(b'\0');digest.update(hashlib.sha256(data).digest())
+        # Repository-level templates live beside actions, including single-action sources.
+        templates = device_templates(source, local=True)
+        if templates:
+            (target/'device_templates').mkdir()
+            for entry in templates:
+                relative = 'device_templates/' + entry['id'] + '.json'
+                data = json.dumps(entry['template'], sort_keys=True, allow_nan=False).encode()
+                count+=1;size+=len(data)
+                if count>2048 or size>32*1024*1024:raise Invalid('Local action source exceeds its file or size limits.')
+                (target/relative).write_bytes(data)
+                digest.update(relative.encode());digest.update(b'\0');digest.update(hashlib.sha256(data).digest())
         return digest.hexdigest()
     async def delete(self,value):
         if not isinstance(value,dict) or set(value)!={'id','confirmed'} or not isinstance(value['id'],str) or value['confirmed'] is not True:
@@ -422,6 +462,7 @@ class Repositories:
                 if any(a['manifest']['id']==data['id'] for a in actions):raise Invalid('Duplicate action ID in repository.')
                 actions.append({'type':f"git-{id}-{data['id']}",'repository_id':id,'commit':commit,'snapshot':snapshot,'directory':str(directory.relative_to(target)),'manifest':data,'source_kind':repo.get('kind','git'),**({'release':release_info} if release_info else {})})
             if not actions or len(actions)>64:raise Invalid('Repository must contain 1 to 64 actions.')
+            templates=device_templates(target)
             shutil.rmtree(target/'.git',ignore_errors=True)
             versions=self.versions(repo)
             existing=next((v for v in versions if v['commit']==commit and v.get('release')== (release_info or None) and {a['type'] for a in v['actions']}=={a['type'] for a in actions}),None)
@@ -429,7 +470,7 @@ class Repositories:
                 actions=existing['actions']
             else:
                 versions.append({'snapshot':snapshot,'commit':commit,'release':release_info or None,'actions':copy.deepcopy(actions),'downloaded':stamp()})
-            await self.update(id,status='Ready',actions=actions,commit=commit,versions=versions,update_available=False,available=None,check_error=None,**({'release':release_info} if release_info else {}),logs=['Repository validated. No action code was executed.'],updated=stamp())
+            await self.update(id,status='Ready',actions=actions,device_templates=templates,template_snapshot=actions[0]['snapshot'],commit=commit,versions=versions,update_available=False,available=None,check_error=None,**({'release':release_info} if release_info else {}),logs=['Repository validated. No action code was executed.'],updated=stamp())
         except asyncio.CancelledError:
             shutil.rmtree(target,ignore_errors=True);raise
         except Exception:

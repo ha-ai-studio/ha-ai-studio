@@ -58,7 +58,7 @@ def unpack(data, target):
             mode = entry.external_attr >> 16
             if (not path.parts or path.is_absolute() or '\\' in entry.filename
                     or any(p in ('', '.', '..') or p.startswith('.') for p in entry.filename.rstrip('/').split('/'))
-                    or path.parts[0] != 'actions' or len(path.parts) < 2
+                    or path.parts[0] not in ('actions', 'device_templates') or len(path.parts) < 2
                     or path.as_posix() in seen or entry.flag_bits & 1
                     or stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR)):
                 raise Invalid('Invalid release archive path or file type.')
