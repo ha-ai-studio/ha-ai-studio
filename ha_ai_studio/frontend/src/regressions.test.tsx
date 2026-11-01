@@ -62,6 +62,7 @@ function mockApi(value = action()) {
           "environment",
           "deactivate",
           "reload-source",
+          "action-version",
           "brokers",
           "repositories",
           "discovery",
@@ -464,4 +465,79 @@ it("offers stable release sources without local development and submits latest",
       ),
     ).toBe(true),
   );
+});
+
+describe("Action version selection", () => {
+  function versioned() {
+    const value = action();
+    value.plugin!.snapshot = "new";
+    value.plugin!.version = "2";
+    value.versions = [
+      {
+        snapshot: "old",
+        version: "1",
+        commit: "a".repeat(40),
+        release: { tag: "v1" },
+        url: "https://github.com/test/repo/releases/tag/v1",
+      },
+      {
+        snapshot: "new",
+        version: "2",
+        commit: "b".repeat(40),
+        release: { tag: "v2" },
+      },
+    ];
+    return value;
+  }
+  it("selects a downgrade in General and applies its immutable snapshot", async () => {
+    const value = versioned();
+    const fixture = mockApi(value);
+    render(
+      <ActionEditor
+        id="fixture"
+        back={() => {}}
+        onDirty={() => {}}
+        onBusy={() => {}}
+      />,
+    );
+    const select = await screen.findByRole("combobox", { name: "Version" });
+    expect(select).toHaveValue("new");
+    await userEvent.selectOptions(select, "old");
+    expect(
+      screen.getByRole("link", { name: "View release or commit" }),
+    ).toHaveAttribute("href", value.versions![0].url);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Apply version" }),
+    );
+    await waitFor(() =>
+      expect(
+        fixture.calls.some(
+          (c) =>
+            c.path.endsWith("/action-version") &&
+            (c.body as { snapshot: string }).snapshot === "old",
+        ),
+      ).toBe(true),
+    );
+  });
+  it("prevents version changes while settings have unsaved changes", async () => {
+    mockApi(versioned());
+    render(
+      <ActionEditor
+        id="fixture"
+        back={() => {}}
+        onDirty={() => {}}
+        onBusy={() => {}}
+      />,
+    );
+    const select = await screen.findByRole("combobox", { name: "Version" });
+    await userEvent.selectOptions(select, "old");
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Name" }),
+      " edited",
+    );
+    expect(select).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Apply version" }),
+    ).toBeDisabled();
+  });
 });

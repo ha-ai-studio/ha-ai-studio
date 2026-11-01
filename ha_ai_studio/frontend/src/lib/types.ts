@@ -29,12 +29,33 @@ export interface ActionType {
   editor?: string | null;
   version?: string;
   commit?: string;
+  snapshot?: string;
   example?: { request_id?: string; data: Json } | null;
   input_schema: Schema;
   output_schema: Schema;
   settings_schema: Schema;
 }
+export interface ActionVersion {
+  snapshot: string;
+  version: string;
+  commit: string;
+  release?: { tag: string } | null;
+  url?: string | null;
+}
+export interface VersionPreview {
+  actions: {
+    id: string;
+    name: string;
+    current: string;
+    current_label: string;
+    target_label: string;
+    snapshot: string | null;
+    reason: string | null;
+  }[];
+  environment_errors: string[];
+}
 export interface ActionState {
+  versions?: ActionVersion[];
   definition: { id: string; name: string; type: string };
   supported: boolean;
   enabled: boolean;
@@ -71,6 +92,17 @@ export interface Discovery {
   legacy_pending: boolean;
 }
 export interface Repository {
+  update_available?: boolean;
+  checked?: string;
+  check_error?: string | null;
+  versions?: {
+    snapshot: string;
+    commit: string;
+    release?: { tag: string } | null;
+    url?: string | null;
+    downloaded?: string;
+    actions: { manifest: { name: string; version: string } }[];
+  }[];
   kind?: "git" | "local" | "release";
   release?: { tag: string; release_id: number; sha256: string };
   id: string;
@@ -116,6 +148,10 @@ export interface ApiResponses {
   deactivate: ActionState;
   environment: ActionState;
   "reload-source": ActionState;
+  "action-version": ActionState;
+  "repository-check": { repositories: Repository[] };
+  "repository-actions-preview": VersionPreview;
+  "repository-actions-update": VersionPreview;
   brokers: Brokers;
   "broker-refresh": Brokers;
   "broker-delete": Brokers;

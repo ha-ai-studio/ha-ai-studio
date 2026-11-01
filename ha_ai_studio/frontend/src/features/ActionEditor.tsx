@@ -4,6 +4,7 @@ import {
   Card,
   Checkbox,
   Input,
+  IconButton,
   Notice,
   Select,
 } from "../design-system";
@@ -64,6 +65,8 @@ export function ActionEditor({
   const [state, setState] = useState<ActionState>();
   const [brokers, setBrokers] = useState<Brokers>();
   const [draft, setDraft] = useState<Configuration>();
+  const [staleVersion, setStaleVersion] = useState(false);
+  const [selectedVersion, setSelectedVersion] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loadingError, setLoadingError] = useState("");
@@ -89,6 +92,8 @@ export function ActionEditor({
   }, [op.busy, editorBusy, onBusy]);
   function load(value: ActionState) {
     setState(value);
+    setStaleVersion(false);
+    setSelectedVersion(value.plugin?.snapshot || "");
     if (!value.config || !value.supported) {
       setDirty(false);
       return;
@@ -122,11 +127,21 @@ export function ActionEditor({
   usePoll(async (signal) => {
     const generation = version.current;
     const value = await api("action", undefined, id, signal);
+    if (
+      !signal.aborted &&
+      generation === version.current &&
+      value.plugin?.snapshot !== state?.plugin?.snapshot
+    ) {
+      if (dirty || editorBusy) setStaleVersion(true);
+      else load(value);
+      return;
+    }
     if (!signal.aborted && generation === version.current)
       setState((previous) =>
         previous
           ? {
               ...previous,
+              versions: value.versions,
               environment: value.environment,
               issues: value.issues,
               busy: value.busy,
@@ -187,6 +202,7 @@ export function ActionEditor({
       </section>
     );
   const ready =
+    !staleVersion &&
     !editorBusy &&
     ((!!state.plugin?.dynamic && !state.plugin.editor) || legacyReady);
   return (
@@ -291,6 +307,19 @@ export function ActionEditor({
       <Notice error>
         {op.error || loadingError || state.issues.join(" ")}
       </Notice>
+      {staleVersion && (
+        <Notice error>
+          The action version changed elsewhere. Reload to use its current
+          settings editor.
+          <Button
+            onClick={() =>
+              void op.run(async () => load(await api("action", undefined, id)))
+            }
+          >
+            Discard changes and reload
+          </Button>
+        </Notice>
+      )}
       {state.supported && (
         <form
           id="action-config"
@@ -300,7 +329,11 @@ export function ActionEditor({
             void op.run(async () => {
               const value = await api(
                 "action",
-                { config: configuration(), enabled },
+                {
+                  config: configuration(),
+                  enabled,
+                  snapshot: state.plugin?.snapshot,
+                },
                 id,
               );
               load(value);
@@ -310,7 +343,7 @@ export function ActionEditor({
             });
           }}
         >
-          <fieldset disabled={op.busy}>
+          <fieldset disabled={op.busy || staleVersion}>
             <Card title="General">
               <Input
                 label="Name"
@@ -322,6 +355,83 @@ export function ActionEditor({
                   changed();
                 }}
               />
+              {state.plugin?.dynamic && (
+                <>
+                  <Select
+                    label="Version"
+                    value={selectedVersion}
+                    disabled={
+                      op.busy ||
+                      state.busy ||
+                      state.enabled ||
+                      dirty ||
+                      editorBusy
+                    }
+                    onChange={(e) => setSelectedVersion(e.target.value)}
+                  >
+                    {(state.versions || []).map((item) => (
+                      <option key={item.snapshot} value={item.snapshot}>
+                        {item.version} ·{" "}
+                        {item.release?.tag || item.commit.slice(0, 12)}
+                        {item.snapshot === state.plugin?.snapshot
+                          ? " · Current"
+                          : ""}
+                      </option>
+                    ))}
+                  </Select>
+                  <p className="small muted">
+                    Select a downloaded version to upgrade or downgrade. Save or
+                    discard settings first. The action and devices using it must
+                    be inactive.
+                  </p>
+                  <div className="action-version-controls">
+                    {state.versions?.find(
+                      (item) => item.snapshot === selectedVersion,
+                    )?.url && (
+                      <a
+                        href={
+                          state.versions.find(
+                            (item) => item.snapshot === selectedVersion,
+                          )!.url!
+                        }
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        View release or commit
+                      </a>
+                    )}
+                    <IconButton
+                      icon="apply"
+                      label="Apply version"
+                      title="Apply the selected action version"
+                      disabled={
+                        !selectedVersion ||
+                        selectedVersion === state.plugin.snapshot ||
+                        op.busy ||
+                        state.busy ||
+                        state.enabled ||
+                        dirty ||
+                        editorBusy
+                      }
+                      onClick={() => {
+                        version.current++;
+                        void op.run(async () => {
+                          load(
+                            await api(
+                              "action-version",
+                              { snapshot: selectedVersion },
+                              id,
+                            ),
+                          );
+                          setMessage(
+                            "Version saved. Preparing the Python environment.",
+                          );
+                        });
+                      }}
+                    />
+                  </div>
+                </>
+              )}
               <Checkbox
                 label="Active"
                 checked={enabled}
