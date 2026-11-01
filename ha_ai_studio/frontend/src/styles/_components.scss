@@ -619,3 +619,18 @@ tr:last-child td {
     margin: auto;
   }
 }
+
+.entity-field-control {
+  position: relative;
+  input { padding-left: 44px; padding-right: 40px; cursor: pointer; }
+  .entity-field-search, .entity-field-clear {
+    position: absolute; bottom: 4px; width: 32px; height: 32px;
+    padding: 6px; border: 0; background: transparent; border-radius: 4px;
+    display: grid; place-items: center; cursor: pointer;
+    &:hover { background: var(--hover); }
+    &:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    &:disabled { opacity: .4; cursor: default; }
+  }
+  .entity-field-search { left: 6px; color: var(--accent); svg { width: 20px; height: 20px; } }
+  .entity-field-clear { right: 6px; color: var(--text); font-size: 20px; }
+}

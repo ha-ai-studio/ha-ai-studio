@@ -202,3 +202,26 @@ new identities, remain inactive and have Home Assistant publication disabled.
 
 Templates include labels and configuration. Only distribute intentionally public
 examples; never package private labels, credentials, images or runtime data.
+
+## Sensor history for trusted Actions
+
+Actions declaring `home_assistant` can call
+`context['home_assistant'].history('sensor.example', hours=24)` during execution.
+The entity must be present in saved settings. The server owns authentication and
+limits queries to 1–168 whole hours and 10000 records. The result contains
+`entity_id`, UTC `start`/`end`, and `readings` with only `state`, `timestamp`, `unit`
+and `state_class`. The timestamp is HA's `last_updated`. Arbitrary attributes and
+context are stripped. The client response has a 4 MiB limit; HA responses retain
+the server's 8 MiB limit. Missing history is not a zero reading.
+
+A ready-to-import development Action is provided in
+`actions/water-leak-detection` in the separate
+`ha-ai-studio-actions-ai-on-the-edge-meters` repository. See its Action README
+for setup, sensor bindings and assessment limitations.
+It is an explicit local source, not an automatically installed bundled type.
+
+String settings can declare `"x-ha-entity-domains": ["sensor"]` to offer the
+shared Home Assistant entity search beside the field. Supported domains are
+`camera`, `light`, `switch`, and `sensor`. Selection changes only the draft value;
+Studio still owns saving and schema validation. The Action must also declare
+`home_assistant` to use the selected entity during execution.

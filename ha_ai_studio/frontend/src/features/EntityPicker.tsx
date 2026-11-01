@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Button, Input, Select, SidePanel } from "../design-system";
 import { appUrl } from "../lib/api";
 export interface HAEntity {
@@ -8,9 +8,34 @@ export interface HAEntity {
   available: boolean;
 }
 export interface EntityPickerOptions {
-  domains: ("camera" | "light" | "switch")[];
+  domains: ("camera" | "light" | "switch" | "sensor")[];
   title?: string;
 }
+export function EntitySearchField({label, hint, value, onChoose, onClear}: {
+  label: string; hint?: string; value: string; onChoose: () => void; onClear: () => void;
+}) {
+  const id = useId();
+  return <div className="field">
+    <label htmlFor={id}>{label}</label>
+    <div className="entity-field-control">
+      <input id={id} value={value} readOnly placeholder="Choose an entity"
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        onClick={onChoose} onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {event.preventDefault(); onChoose();}
+        }} />
+      <button type="button" className="entity-field-search" aria-label={`Choose ${label}`}
+        title={`Choose ${label}`} onClick={onChoose}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>
+        </svg>
+      </button>
+      <button type="button" className="entity-field-clear" aria-label={`Clear ${label}`}
+        title={`Clear ${label}`} disabled={!value} onClick={onClear}>×</button>
+    </div>
+    {hint && <small id={`${id}-hint`} className="muted">{hint}</small>}
+  </div>;
+}
+
 export function EntityPicker({
   options,
   onSelect,

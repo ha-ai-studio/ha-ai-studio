@@ -567,9 +567,9 @@ class Environment:
                 request['context']['home_assistant']=access
                 from .test_progress import current
                 log=current.get() or (lambda message:None)
-                log('Starting reference capture. Configured delays apply between device operations.' if mode=='reference_capture' else 'Starting capture and recognition process. Configured delays apply between device operations.')
+                log('Starting reference capture. Configured delays apply between device operations.' if mode=='reference_capture' else 'Starting Action execution. Configured delays apply between device operations.')
                 response=await run_process(180)
-                log('Reference capture finished. Validating images.' if mode=='reference_capture' else 'Recognition process finished. Validating results and report.')
+                log('Reference capture finished. Validating images.' if mode=='reference_capture' else 'Action execution finished. Validating results.')
         else:response=await run_process(30)
         try:
             value=json.loads(response,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
