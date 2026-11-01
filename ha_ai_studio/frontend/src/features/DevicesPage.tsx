@@ -74,7 +74,11 @@ export function DevicesPage({ open }: { open: (id: string) => void }) {
             <td>
               {(item.active?.sensors || []).map((sensor) => (
                 <div key={sensor.id}>
-                  {sensor.name}: {item.values[sensor.id]?.value ?? "—"}{" "}
+                  {sensor.name}:{" "}
+                  {sensor.rate &&
+                  (!item.enabled || item.values[sensor.id]?.status !== "ready")
+                    ? "Unavailable"
+                    : (item.values[sensor.id]?.value ?? "—")}{" "}
                   {sensor.unit}
                 </div>
               ))}
@@ -399,7 +403,8 @@ export function DeviceEditor({
                 Sensors <span className="muted">({config.sensors.length})</span>
               </h2>
               <p>
-                Each sensor displays a number or text supplied by an Action.
+                Sensors display Action readings or calculate a rate from another
+                sensor.
               </p>
             </div>
             <Button
@@ -462,13 +467,23 @@ export function DeviceEditor({
                 key={index}
                 name={sensor.name || `Sensor ${index + 1}`}
                 reading={
-                  value?.value === undefined
-                    ? "No reading yet"
-                    : `${value.value} ${activeUnit}`.trim()
+                  sensor.rate && (!item.enabled || value?.status !== "ready")
+                    ? "Unavailable"
+                    : value?.value === undefined
+                      ? "No reading yet"
+                      : `${value.value} ${activeUnit}`.trim()
                 }
-                source={selected?.definition.name || "Choose an Action"}
+                source={
+                  sensor.rate
+                    ? `Rate of change · ${config.sensors.find((s) => s.id === sensor.rate?.source)?.name || "Choose a source sensor"}`
+                    : selected?.definition.name || "Choose an Action"
+                }
                 error={value?.error}
-                initiallyOpen={!sensor.action_id || !sensor.reading}
+                initiallyOpen={
+                  sensor.rate
+                    ? !sensor.rate.source
+                    : !sensor.action_id || !sensor.reading
+                }
               >
                 <div className="device-field-grid">
                   <Input
@@ -489,54 +504,149 @@ export function DeviceEditor({
                     }
                   />
                 </div>
-                <div className="device-field-grid">
-                  <Select
-                    label="Action"
-                    required
-                    value={sensor.action_id}
-                    onChange={(e) =>
-                      sensorChange(index, {
-                        action_id: e.target.value,
-                        reading: "",
-                      })
-                    }
-                  >
-                    <option value="">Select an action</option>
-                    {actions.map((a) => (
-                      <option key={a.definition.id} value={a.definition.id}>
-                        {a.definition.name}
-                      </option>
-                    ))}
-                  </Select>
-                  {meters.length ? (
+                <Select
+                  label="Sensor type"
+                  value={sensor.rate ? "rate" : "action"}
+                  onChange={(e) => {
+                    const { rate: _rate, ...base } = sensor;
+                    const next: DeviceSensor =
+                      e.target.value === "rate"
+                        ? {
+                            ...base,
+                            action_id: "",
+                            reading: "",
+                            cumulative: false,
+                            rate: {
+                              source: "",
+                              factor: 1,
+                              time_base: "minute",
+                            },
+                          }
+                        : { ...base, action_id: "", reading: "" };
+                    change({
+                      sensors: config.sensors.map((s, i) =>
+                        i === index ? next : s,
+                      ),
+                    });
+                  }}
+                >
+                  <option value="action">Action reading</option>
+                  <option value="rate">Rate of change</option>
+                </Select>
+                {sensor.rate ? (
+                  <>
                     <Select
-                      label="Action reading"
+                      label="Source sensor"
                       required
-                      value={sensor.reading}
+                      value={sensor.rate.source}
                       onChange={(e) =>
-                        sensorChange(index, { reading: e.target.value })
+                        sensorChange(index, {
+                          rate: { ...sensor.rate!, source: e.target.value },
+                        })
                       }
                     >
-                      <option value="">Select a reading</option>
-                      {meters.map((m) => (
-                        <option value={m.id} key={m.id}>
-                          {m.name || m.id}
+                      <option value="">Select a source sensor</option>
+                      {config.sensors
+                        .filter((s) => !s.rate && s.id !== sensor.id)
+                        .map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                    </Select>
+                    <div className="device-field-grid">
+                      <Input
+                        label="Conversion factor"
+                        type="number"
+                        required
+                        min={Number.MIN_VALUE}
+                        step="any"
+                        hint="Use 1000 to convert m³ to litres. The Unit field describes the result, for example L/min."
+                        value={sensor.rate.factor}
+                        onChange={(e) =>
+                          sensorChange(index, {
+                            rate: {
+                              ...sensor.rate!,
+                              factor: Number(e.target.value),
+                            },
+                          })
+                        }
+                      />
+                      <Select
+                        label="Time base"
+                        value={sensor.rate.time_base}
+                        onChange={(e) =>
+                          sensorChange(index, {
+                            rate: {
+                              ...sensor.rate!,
+                              time_base: e.target.value as
+                                "second" | "minute" | "hour",
+                            },
+                          })
+                        }
+                      >
+                        <option value="second">Per second</option>
+                        <option value="minute">Per minute</option>
+                        <option value="hour">Per hour</option>
+                      </Select>
+                    </div>
+                    <p className="small muted">
+                      Average rate = change in source value × conversion factor
+                      ÷ elapsed time in the selected time base. Requires two
+                      valid numeric measurements; this is not an instantaneous
+                      reading.
+                    </p>
+                  </>
+                ) : (
+                  <div className="device-field-grid">
+                    <Select
+                      label="Action"
+                      required
+                      value={sensor.action_id}
+                      onChange={(e) =>
+                        sensorChange(index, {
+                          action_id: e.target.value,
+                          reading: "",
+                        })
+                      }
+                    >
+                      <option value="">Select an action</option>
+                      {actions.map((a) => (
+                        <option key={a.definition.id} value={a.definition.id}>
+                          {a.definition.name}
                         </option>
                       ))}
                     </Select>
-                  ) : (
-                    <Input
-                      label="Action reading ID"
-                      required
-                      pattern={"[a-z][a-z0-9\\-]{0,47}"}
-                      value={sensor.reading}
-                      hint="The named reading supplied by this action."
-                      onChange={(e) =>
-                        sensorChange(index, { reading: e.target.value })
-                      }
-                    />
-                  )}
-                </div>
+                    {meters.length ? (
+                      <Select
+                        label="Action reading"
+                        required
+                        value={sensor.reading}
+                        onChange={(e) =>
+                          sensorChange(index, { reading: e.target.value })
+                        }
+                      >
+                        <option value="">Select a reading</option>
+                        {meters.map((m) => (
+                          <option value={m.id} key={m.id}>
+                            {m.name || m.id}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Input
+                        label="Action reading ID"
+                        required
+                        pattern={"[a-z][a-z0-9\\-]{0,47}"}
+                        value={sensor.reading}
+                        hint="The named reading supplied by this action."
+                        onChange={(e) =>
+                          sensorChange(index, { reading: e.target.value })
+                        }
+                      />
+                    )}
+                  </div>
+                )}
                 <details className="sensor-advanced">
                   <summary>Advanced settings</summary>
                   <p className="small muted">
@@ -565,13 +675,15 @@ export function DeviceEditor({
                       }
                     />
                   </div>
-                  <Checkbox
-                    label="Cumulative counter (value must not decrease)"
-                    checked={sensor.cumulative}
-                    onChange={(e) =>
-                      sensorChange(index, { cumulative: e.target.checked })
-                    }
-                  />
+                  {!sensor.rate && (
+                    <Checkbox
+                      label="Cumulative counter (value must not decrease)"
+                      checked={sensor.cumulative}
+                      onChange={(e) =>
+                        sensorChange(index, { cumulative: e.target.checked })
+                      }
+                    />
+                  )}
                   <Input
                     label="Maximum change per reading"
                     type="number"

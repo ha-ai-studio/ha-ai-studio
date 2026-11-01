@@ -130,6 +130,11 @@ export interface ApiResponses {
 }
 
 export interface DeviceSensor {
+  rate?: {
+    source: string;
+    factor: number;
+    time_base: "second" | "minute" | "hour";
+  };
   id: string;
   name: string;
   cumulative: boolean;

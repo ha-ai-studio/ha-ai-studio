@@ -127,12 +127,12 @@ class Devices:
             raise Invalid('Provide publication and up to 16 sensors.')
         ids = set()
         for sensor in config['sensors']:
-            if not isinstance(sensor, dict) or set(sensor) != {'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change'}:
+            if not isinstance(sensor, dict) or set(sensor) not in ({'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change'}, {'id', 'name', 'device_class', 'cumulative', 'unit', 'action_id', 'reading', 'max_change', 'rate'}):
                 raise Invalid('Provide the complete sensor definition.')
             if not identifier(sensor['id']) or sensor['id'] in ids or not name(sensor['name']):
                 raise Invalid('Sensor IDs must be unique lowercase names; provide a sensor name.')
             ids.add(sensor['id'])
-            if not identifier(sensor['reading']):
+            if 'rate' not in sensor and not identifier(sensor['reading']):
                 raise Invalid('Select a named action reading.')
             if type(sensor['cumulative']) is not bool:
                 raise Invalid('Specify whether this is a cumulative counter.')
@@ -143,9 +143,27 @@ class Devices:
             maximum = sensor['max_change']
             if maximum is not None and (type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum <= 0):
                 raise Invalid('Maximum change must be a positive finite number or empty.')
+            if 'rate' in sensor:
+                rate = sensor['rate']
+                if not isinstance(rate, dict) or set(rate) != {'source', 'factor', 'time_base'}:
+                    raise Invalid('Provide the source, conversion factor and time base for the rate.')
+                if not identifier(rate['source']):raise Invalid('Select a source sensor.')
+                if type(rate['factor']) not in (int, float) or not math.isfinite(rate['factor']) or rate['factor'] <= 0:
+                    raise Invalid('Conversion factor must be a positive finite number.')
+                if type(rate['time_base']) is not str or rate['time_base'] not in ('second', 'minute', 'hour'):
+                    raise Invalid('Select second, minute or hour as the time base.')
+                if sensor['action_id'] != '' or sensor['reading'] != '' or sensor['cumulative']:
+                    raise Invalid('Rate sensors cannot have an Action reading or be cumulative counters.')
+                continue
             action = self.studio.get(sensor['action_id'])
             if not action.supported:
                 raise Invalid('Select a supported action.')
+        by_id = {s['id']: s for s in config['sensors']}
+        for sensor in config['sensors']:
+            if 'rate' not in sensor:continue
+            source = by_id.get(sensor['rate']['source'])
+            if source is None or 'rate' in source or source['id'] == sensor['id']:
+                raise Invalid('Rate source must be an Action sensor in this device; derived sources and cycles are not supported.')
         return copy.deepcopy(config)
 
     async def save(self, id, value):
@@ -173,14 +191,15 @@ class Devices:
                 if config['publish'] and (activate or not current['active'] or not current['active']['publish']) and not self.studio.discovery.data['config']['enabled']:
                     raise Invalid('Enable central Home Assistant discovery in Settings before publishing devices.')
                 if activate:
-                    for action_id in sorted({s['action_id'] for s in config['sensors']}):
+                    for action_id in sorted({s['action_id'] for s in config['sensors'] if 'rate' not in s}):
                         await locks.enter_async_context(self.studio.get(action_id).lock)
                 for sensor in config['sensors']:
                     old = semantics_by_id.get(sensor['id'])
                     semantics = [sensor['device_class'], sensor['unit'], sensor['cumulative']]
+                    if 'rate' in sensor:semantics.append(sensor['rate'])
                     if old and old != semantics:raise Invalid('A sensor’s published metadata and counter behavior cannot change. Add a new sensor ID instead.')
                     if activate or config['publish']:semantics_by_id[sensor['id']] = semantics
-                    if not activate:continue
+                    if not activate or 'rate' in sensor:continue
                     action = self.studio.get(sensor['action_id'])
                     if action.environment:action.environment.require()
                     action_config = await action.check_config(action.config['active'] if action.enabled else action.config['draft'])
@@ -193,6 +212,16 @@ class Devices:
             item = candidate['items'][id]
             item['draft'] = config
             item['sensor_identities'] = semantics_by_id
+            if activate or apply_settings:
+                old_sensors = {s['id']: s for s in (current['active'] or {'sensors': []})['sensors']}
+                changed = {s['id'] for s in config['sensors'] if old_sensors.get(s['id']) != s}
+                # Labels and validation limits do not change the measurement's provenance.
+                changed = {s['id'] for s in config['sensors'] if s['id'] in changed and s['id'] in old_sensors and
+                    any(old_sensors.get(s['id'], {}).get(k) != s.get(k)
+                        for k in ('action_id', 'reading', 'unit', 'cumulative', 'rate'))}
+                for sensor in config['sensors']:
+                    if sensor['id'] in changed or sensor.get('rate', {}).get('source') in changed:
+                        item['values'].pop(sensor['id'], None)
             if activate:
                 item.update(active=copy.deepcopy(config), enabled=True, bindings=bindings,
                             status='ready', next_run=time.time() + config['interval_minutes'] * 60)
@@ -235,6 +264,10 @@ class Devices:
         candidate = copy.deepcopy(self.data)
         candidate['items'][id].update(status='running', last_attempt=timestamp(),
             next_run=time.time() + item['active']['interval_minutes'] * 60)
+        for sensor in item['active']['sensors']:
+            if 'rate' in sensor:
+                candidate['items'][id]['values'].setdefault(sensor['id'], {}).update(
+                    status='unavailable', error='Waiting for a new valid source measurement.')
         self.commit(candidate)  # Durable intent before any action, including restart interruption.
         self.logs[id] = []
         self.log(id, 'Measurement started.')
@@ -268,6 +301,7 @@ class Devices:
                     output = result['data']
                     readings = output.get('readings') if isinstance(output, dict) else None
                     if not isinstance(readings, list):raise Invalid('Action must return a readings array.')
+                    measured_at = time.time()
                     for sensor in sensors:
                         try:
                             matches = [r for r in readings if isinstance(r, dict) and r.get('id') == sensor['reading']]
@@ -295,7 +329,11 @@ class Devices:
                                     raise Invalid('Counter reading decreased or is negative. Check the reading or configure a new sensor for a replacement counter.')
                                 if previous is not None and sensor['max_change'] is not None and abs(value - previous) > sensor['max_change']:
                                     raise Invalid('Reading exceeds the maximum change.')
-                            now = time.time()
+                            now = reading.get('measured_at', measured_at)
+                            if type(now) not in (int, float) or not math.isfinite(now) or now < 0 or now > measured_at:
+                                raise Invalid('Measurement time must be a finite Unix timestamp, not in the future.')
+                            if values.get(sensor['id'], {}).get('measured_at', -1) >= now:
+                                raise Invalid('Measurement time must be later than the last valid reading.')
                             values[sensor['id']] = {'value': value, 'measured_at': now, 'timestamp': timestamp(now), 'status': 'ready', 'error': None}
                             successes += 1
                             self.log(id, sensor['id'] + ': Reading accepted.')
@@ -305,6 +343,31 @@ class Devices:
                 except Exception:
                     self.log(id, 'Action failed or returned an unsupported reading. Check its configuration.')
                     for sensor in sensors:values.setdefault(sensor['id'], {}).update(status='error', error='Action failed or returned an unsupported reading. Check its configuration.')
+                for sensor in config['sensors']:
+                    if 'rate' not in sensor or sensor['rate']['source'] not in {s['id'] for s in sensors}:continue
+                    try:
+                        rate = sensor['rate']
+                        source = values.get(rate['source'], {})
+                        previous = item['values'].get(rate['source'], {})
+                        if source.get('status') != 'ready' or type(source.get('value')) not in (int, float):
+                            raise Invalid('Source sensor has no valid numeric measurement.')
+                        if type(previous.get('value')) not in (int, float):
+                            raise Invalid('Waiting for two valid source measurements.')
+                        elapsed = source['measured_at'] - previous['measured_at']
+                        if elapsed <= 0:raise Invalid('Source measurement time must increase.')
+                        value = ((source['value'] - previous['value']) / elapsed) * rate['factor'] * {'second': 1, 'minute': 60, 'hour': 3600}[rate['time_base']]
+                        if not math.isfinite(value):raise Invalid('Calculated rate is not finite.')
+                        old = values.get(sensor['id'], {}).get('value')
+                        if old is not None and sensor['max_change'] is not None and abs(value - old) > sensor['max_change']:
+                            raise Invalid('Calculated rate exceeds the maximum change.')
+                        values[sensor['id']] = {'value': value, 'measured_at': source['measured_at'],
+                            'timestamp': source['timestamp'], 'status': 'ready', 'error': None}
+                        successes += 1
+                        self.log(id, sensor['id'] + ': Rate calculated.')
+                    except (Invalid, OverflowError) as exc:
+                        if isinstance(exc, OverflowError):exc = Invalid('Calculated rate is not finite.')
+                        values.setdefault(sensor['id'], {}).update(status='unavailable', error=str(exc))
+                        self.log(id, sensor['id'] + ': ' + str(exc))
                 # Preserve completed independent measurements if a later action is interrupted.
                 candidate = copy.deepcopy(self.data)
                 candidate['items'][id]['values'] = copy.deepcopy(values)

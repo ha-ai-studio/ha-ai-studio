@@ -375,3 +375,105 @@ it("refreshes an untouched Active checkbox and preserves local edits after a fai
   expect(onDirty).toHaveBeenLastCalledWith(true);
   expect(persistedEnabled).toBe(false);
 });
+
+it("configures a derived rate without another Action and hides stale values", async () => {
+  const { DeviceEditor } = await import("./DevicesPage");
+  const source = {
+    id: "water",
+    name: "Water meter",
+    unit: "m³",
+    action_id: "reader",
+    reading: "main",
+    device_class: "water",
+    cumulative: true,
+    max_change: null,
+  };
+  let state = {
+    id: "fixture",
+    draft: {
+      name: "Water",
+      interval_minutes: 30,
+      publish: false,
+      sensors: [source] as import("../lib/types").DeviceSensor[],
+    },
+    active: null as import("../lib/types").DeviceConfig | null,
+    enabled: false,
+    busy: false,
+    status: "disabled",
+    publication: "Not published",
+    values: {
+      "measurement-1": {
+        value: 99,
+        status: "unavailable",
+        error: "Waiting for a new valid source measurement.",
+      },
+    },
+  };
+  const saves: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (target: URL, options: RequestInit) => {
+      if (options.body) {
+        const body = JSON.parse(String(options.body));
+        saves.push(body);
+        state = {
+          ...state,
+          draft: body.config,
+          active: body.config,
+          enabled: body.enabled,
+        };
+      }
+      return {
+        ok: true,
+        json: async () =>
+          structuredClone(
+            new URL(target).pathname.endsWith("/actions")
+              ? {
+                  actions: [
+                    {
+                      definition: { id: "reader", name: "Reader" },
+                      supported: true,
+                      enabled: false,
+                    },
+                  ],
+                }
+              : state,
+          ),
+      };
+    }),
+  );
+  render(
+    <DeviceEditor
+      id="fixture"
+      back={() => {}}
+      onDirty={() => {}}
+      onBusy={() => {}}
+    />,
+  );
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Add sensor" }),
+  );
+  await userEvent.selectOptions(
+    screen.getAllByLabelText("Sensor type")[1],
+    "rate",
+  );
+  const selector = screen.getByLabelText("Source sensor");
+  expect(within(selector).getAllByRole("option")).toHaveLength(2);
+  await userEvent.selectOptions(selector, "water");
+  const factor = screen.getByLabelText(/^Conversion factor/);
+  await userEvent.clear(factor);
+  await userEvent.type(factor, "1000");
+  await userEvent.type(screen.getAllByLabelText(/^Unit/)[1], "L/min");
+  expect(screen.getAllByLabelText("Action", { exact: true })).toHaveLength(1);
+  expect(screen.getByText("Unavailable", { exact: true })).toBeVisible();
+  expect(screen.queryByText("99 L/min")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saves).toHaveLength(1));
+  expect(state.draft.sensors[1]).toMatchObject({
+    action_id: "",
+    reading: "",
+    cumulative: false,
+    unit: "L/min",
+    rate: { source: "water", factor: 1000, time_base: "minute" },
+  });
+});

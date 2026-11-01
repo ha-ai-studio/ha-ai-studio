@@ -451,3 +451,139 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         state = self.manager.get(item['id'])
         self.assertEqual(state['status'], 'error')
         self.assertEqual(state['values']['water']['value'], 123)
+
+    def rate_sensor(self, **rate):
+        return {**sensor('flow', action='', kind='number', unit='L/min'), 'reading': '',
+                'rate': {'source': 'water', 'factor': 1000, 'time_base': 'minute', **rate}}
+
+    async def rate_read(self, id, value, measured_at):
+        return await self.run_device(id, [{**reading(value=value), 'measured_at': measured_at}])
+
+    async def test_rate_average_zero_restart_and_single_action_execution(self):
+        item = await configured_device(self.studio, [self.rate_sensor(), sensor()])
+        execute = await self.rate_read(item['id'], 123.450, 1000)
+        execute.assert_awaited_once()
+        self.assertEqual(self.manager.get(item['id'])['values']['flow']['status'], 'unavailable')
+        self.assertNotIn('value', self.manager.get(item['id'])['values']['flow'])
+        await self.rate_read(item['id'], 123.465, 1300)
+        self.assertAlmostEqual(self.manager.get(item['id'])['values']['flow']['value'], 3)
+        restored = Studio(self.tmp.name)
+        try:
+            with patch.object(restored.get('reader'), 'execute', AsyncMock(return_value={'readings': [{**reading(value=123.465), 'measured_at': 1600}]})) as execute:
+                restored.devices.start_read(item['id'])
+                await restored.devices.tasks[item['id']]
+                execute.assert_awaited_once()
+            result = restored.devices.get(item['id'])
+            self.assertEqual(result['values']['flow']['value'], 0)
+            self.assertEqual(result['status'], 'ready')
+        finally:await restored.close()
+
+    async def test_rate_rejects_invalid_source_and_time_preserves_last_valid_baseline(self):
+        item = await configured_device(self.studio, [sensor(), self.rate_sensor()])
+        await self.rate_read(item['id'], 100, 1000)
+        await self.rate_read(item['id'], 101, 1060)
+        for value, at in ((102,1060), (102,900), (99,1120), (True,1120), ('wrong',1120), (None,1120), (float('inf'),1120), (102,True), (102,-1), (102,time.time()+3600)):
+            await self.rate_read(item['id'], value, at)
+            state = self.manager.get(item['id'])['values']
+            self.assertEqual(state['flow']['status'], 'unavailable')
+            self.assertAlmostEqual(state['flow']['value'], 1000)
+            self.assertEqual(state['water']['measured_at'], 1060)
+        await self.rate_read(item['id'], 103, 1180)
+        self.assertAlmostEqual(self.manager.get(item['id'])['values']['flow']['value'], 1000)
+        with patch.object(self.action, 'execute', AsyncMock(side_effect=RuntimeError('failed'))):
+            self.manager.start_read(item['id']);await self.manager.tasks[item['id']]
+        self.assertEqual(self.manager.get(item['id'])['values']['flow']['status'], 'unavailable')
+
+    async def test_rate_validation_rejects_cycles_bad_factors_and_missing_sources(self):
+        item = self.manager.create({'name':'Rates'})
+        for patch_rate in ({'source':'missing'}, {'source':'flow'}, {'factor':True}, {'factor':0}, {'factor':-1}, {'factor':float('inf')}, {'factor':None}, {'time_base':'day'}, {'time_base':[]}):
+            with self.subTest(patch_rate=patch_rate), self.assertRaises(Invalid):
+                self.manager.validate({**item['draft'], 'sensors':[sensor(), self.rate_sensor(**patch_rate)]})
+        derived = self.rate_sensor();other = {**self.rate_sensor(source='flow'), 'id':'other'}
+        with self.assertRaises(Invalid):self.manager.validate({**item['draft'], 'sensors':[sensor(), derived, other]})
+        for patch_sensor in ({'cumulative':True}, {'action_id':'reader'}, {'reading':'water'}, {'rate':None}):
+            with self.assertRaises(Invalid):self.manager.validate({**item['draft'], 'sensors':[sensor(), {**derived, **patch_sensor}]})
+
+    async def test_rate_time_bases_signed_values_and_nonfinite_result(self):
+        for base, expected in (('second', -1), ('minute', -60), ('hour', -3600)):
+            item = await configured_device(self.studio, [sensor(kind='number'), self.rate_sensor(time_base=base, factor=1)])
+            await self.rate_read(item['id'], 200, 1000)
+            await self.rate_read(item['id'], 140, 1060)
+            self.assertEqual(self.manager.get(item['id'])['values']['flow']['value'], expected)
+        item = await configured_device(self.studio, [sensor(), self.rate_sensor(factor=1e308)])
+        await self.rate_read(item['id'], 0, 1000)
+        await self.rate_read(item['id'], 1e308, 1060)
+        self.assertEqual(self.manager.get(item['id'])['values']['flow']['status'], 'unavailable')
+
+    async def test_rate_discovery_availability_and_disabled_state(self):
+        broker_id = (await self.studio.brokers.save(broker()))['brokers'][0]['id']
+        await self.studio.discovery.save({**DEFAULT, 'enabled':True, 'broker_id':broker_id})
+        item = await configured_device(self.studio, [sensor(), self.rate_sensor()], publish=True)
+        prefix = item['identity'];topic = prefix+'/available_flow'
+        await self.rate_read(item['id'], 100, 1000)
+        desired = self.studio.discovery.desired()
+        self.assertEqual(desired[topic], 'offline')
+        entity = desired[f'homeassistant/sensor/{prefix}/value_flow/config']
+        self.assertEqual(entity['state_class'], 'measurement')
+        self.assertEqual(entity['availability_mode'], 'all')
+        self.assertNotIn('availability_topic', entity)
+        self.assertIn({'topic':topic}, entity['availability'])
+        await self.rate_read(item['id'], 101, 1060)
+        self.assertEqual(self.studio.discovery.desired()[topic], 'online')
+        await self.rate_read(item['id'], 99, 1120)
+        self.assertEqual(self.studio.discovery.desired()[topic], 'offline')
+        await self.rate_read(item['id'], 102, 1180)
+        self.manager.deactivate(item['id'])
+        self.assertEqual(self.studio.discovery.desired()[topic], 'offline')
+
+    async def test_rate_source_rebinding_resets_baseline_and_formula_identity_is_stable(self):
+        item = await configured_device(self.studio, [sensor(), self.rate_sensor()])
+        await self.rate_read(item['id'], 100, 1000)
+        await self.rate_read(item['id'], 101, 1060)
+        config = copy.deepcopy(item['draft']);config['sensors'][0]['reading'] = 'replacement'
+        await self.manager.save(item['id'], {'config':config, 'enabled':True})
+        self.assertNotIn('water', self.manager.get(item['id'])['values'])
+        self.assertNotIn('flow', self.manager.get(item['id'])['values'])
+        config['sensors'][1]['rate']['factor'] = 1
+        with self.assertRaises(Invalid):await self.manager.save(item['id'], {'config':config, 'enabled':True})
+
+    async def test_rate_integer_overflow_does_not_pause_other_devices(self):
+        item = await configured_device(self.studio, [sensor(kind='number'), self.rate_sensor()])
+        await self.rate_read(item['id'], -10**308, 1000)
+        await self.rate_read(item['id'], 10**308, 1060)
+        self.assertIsNone(self.manager.error)
+        self.assertEqual(self.manager.get(item['id'])['values']['flow']['status'], 'unavailable')
+        self.assertEqual(self.manager.get(item['id'])['status'], 'partial')
+
+    async def test_rate_interrupted_restart_keeps_durable_baseline_without_replay(self):
+        item = await configured_device(self.studio, [sensor(), self.rate_sensor()])
+        await self.rate_read(item['id'], 100, 1000)
+        await self.rate_read(item['id'], 101, 1060)
+        entered = asyncio.Event()
+        async def blocked(*args):
+            entered.set();await asyncio.Event().wait()
+        with patch.object(self.action, 'execute', blocked):
+            self.manager.start_read(item['id']);await entered.wait()
+            self.manager.tasks[item['id']].cancel()
+            with self.assertRaises(asyncio.CancelledError):await self.manager.tasks[item['id']]
+        restored = Studio(self.tmp.name)
+        try:
+            self.assertEqual(restored.devices.get(item['id'])['status'], 'interrupted')
+            self.assertEqual(restored.devices.get(item['id'])['values']['flow']['status'], 'unavailable')
+            self.assertEqual(restored.devices.tasks, {})
+            with patch.object(restored.get('reader'), 'execute', AsyncMock(return_value={'readings':[{**reading(value=103), 'measured_at':1180}]})) as execute:
+                restored.devices.start_read(item['id']);await restored.devices.tasks[item['id']]
+                execute.assert_awaited_once()
+            self.assertAlmostEqual(restored.devices.get(item['id'])['values']['flow']['value'], 1000)
+        finally:await restored.close()
+
+    async def test_rate_maximum_change_accepts_source_but_preserves_rate(self):
+        item = await configured_device(self.studio, [sensor(), {**self.rate_sensor(), 'max_change':500}])
+        for value, at in ((100,1000), (101,1060), (104,1120)):
+            await self.rate_read(item['id'], value, at)
+        state = self.manager.get(item['id'])['values']
+        self.assertAlmostEqual(state['flow']['value'], 1000)
+        self.assertEqual(state['flow']['status'], 'unavailable')
+        self.assertEqual(state['water']['value'], 104)
+        await self.rate_read(item['id'], 105,1180)
+        self.assertEqual(self.manager.get(item['id'])['values']['flow']['status'], 'ready')

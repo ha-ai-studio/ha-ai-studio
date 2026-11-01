@@ -78,6 +78,22 @@ async def main():
         serial_config=studio.discovery.desired()[f'homeassistant/sensor/{prefix}/value_serial/config']
         assert 'state_class' not in serial_config and 'unit_of_measurement' not in serial_config
         assert not any(b'DO-NOT-ANNOUNCE' in p for h,t,p,r in seen if h=='broker3')
+        # Derived rates use retained per-sensor availability and owned-topic cleanup.
+        rate = {**sensor('flow', action='', kind='number', unit='L/min'), 'reading':'',
+                'rate':{'source':'water', 'factor':1000, 'time_base':'minute'}}
+        rate_device = await configured_device(studio, [sensor(action='echo'), rate], publish=True)
+        rate_prefix = rate_device['identity'];rate_available = rate_prefix+'/available_flow'
+        for value, measured_at, expected in ((100,1000,b'offline'), (101,1060,b'online'), (99,1120,b'offline')):
+            start=len(seen)
+            with patch.object(service,'execute',AsyncMock(return_value={'readings':[{**reading(value=value), 'measured_at':measured_at}]})):
+                studio.devices.start_read(rate_device['id']);await studio.devices.tasks[rate_device['id']]
+            await until(lambda:any(t==rate_available and p==expected and r for h,t,p,r in seen[start:]))
+        start=len(seen);await observe('broker3')
+        await until(lambda:any(t==rate_available and p==b'offline' and r for h,t,p,r in seen[start:]))
+        updated=copy.deepcopy(rate_device['draft']);updated['sensors']=[updated['sensors'][0]]
+        await studio.devices.save(rate_device['id'],{'config':updated,'enabled':True})
+        await until(lambda:any(t==rate_available and p==b'' for h,t,p,r in seen))
+        studio.devices.delete({'id':rate_device['id'],'confirmed':True})
         before=copy.deepcopy(service.last);await service.test(config,'{"request_id":"ui","data":0}')
         assert before==service.last
         assert any(h=='broker2' and t=='discovery-check/result' and not r for h,t,p,r in seen)

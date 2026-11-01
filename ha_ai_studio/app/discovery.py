@@ -110,8 +110,16 @@ class Discovery:
                     extra['state_class'] = 'total_increasing' if sensor['cumulative'] else 'measurement'
                 if sensor['device_class']:extra['device_class'] = sensor['device_class']
                 if sensor['unit']:extra['unit_of_measurement'] = sensor['unit']
+                if 'rate' in sensor:
+                    extra['state_class'] = 'measurement'
+                    extra['availability'] = [{'topic': availability}, {'topic': prefix + '/available_' + sensor['id']}]
+                    extra['availability_mode'] = 'all'
                 topic = entity(key, sensor['name'], **extra)
+                if 'rate' in sensor:
+                    result[f"{config['prefix']}/sensor/{prefix}/{key}/config"].pop('availability_topic', None)
                 result[topic] = str(value['value']) if value.get('value') is not None else 'None'
+                if 'rate' in sensor:
+                    result[prefix + '/available_' + sensor['id']] = 'online' if item['enabled'] and value.get('status') == 'ready' else 'offline'
                 result[entity('updated_' + sensor['id'], sensor['name'] + ' last successful reading',
                     device_class='timestamp', entity_category='diagnostic')] = value.get('timestamp', 'None')
                 result[entity('status_' + sensor['id'], sensor['name'] + ' status', entity_category='diagnostic')] = (
